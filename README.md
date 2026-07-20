@@ -11,6 +11,7 @@ Wraps the Cursor Cloud Agents API (`https://api.cursor.com`):
 | `/agent <prompt>` | `POST /v0/agents` — launch an agent on the configured repo |
 | `/agents` | `GET /v0/agents` — list recent agents |
 | `/status <id>` | `GET /v0/agents/{id}` |
+| `/conversation <id>` | `GET /v0/agents/{id}/conversation` |
 | `/followup <id> <text>` | `POST /v0/agents/{id}/followup` |
 | `/stop <id>` | `POST /v0/agents/{id}/stop` |
 | `/delete <id>` | `DELETE /v0/agents/{id}` |
@@ -38,6 +39,13 @@ python bot.py
 ```
 
 Set `ALLOWED_USER_IDS` in `.env` to restrict the bot to specific Telegram users — leave it empty and anyone who finds the bot can spend your Cursor credits.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
 
 ## Files
 

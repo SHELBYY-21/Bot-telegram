@@ -9,6 +9,7 @@ Commands:
   /agent <prompt>       — launch a cloud agent on the configured repo
   /agents               — list recent agents
   /status <id>          — show one agent's status
+  /conversation <id>    — show an agent's conversation history
   /followup <id> <text> — send follow-up instructions to an agent
   /stop <id>            — stop a running agent
   /delete <id>          — delete an agent
@@ -170,6 +171,7 @@ HELP = (
     "/agent &lt;prompt&gt; — launch a cloud agent\n"
     "/agents — list recent agents\n"
     "/status &lt;id&gt; — agent status\n"
+    "/conversation &lt;id&gt; — agent conversation history\n"
     "/followup &lt;id&gt; &lt;text&gt; — send follow-up\n"
     "/stop &lt;id&gt; — stop agent\n"
     "/delete &lt;id&gt; — delete agent\n"
@@ -312,6 +314,33 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await reply(update, fmt_agent(agent))
 
 
+async def cmd_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update):
+        return
+    agent_id = await _require_id(update, context, "Usage: /conversation &lt;agent-id&gt;")
+    if not agent_id:
+        return
+    try:
+        data = await cursor(context).get_conversation(agent_id)
+    except CursorAPIError as e:
+        await reply(update, html.escape(str(e)))
+        return
+    messages = data.get("messages", [])
+    if not messages:
+        await reply(update, "No messages in this conversation.")
+        return
+    lines = []
+    for m in messages:
+        role = m.get("type") or m.get("role") or "message"
+        text = m.get("text") or ""
+        lines.append(f"<b>{html.escape(str(role))}</b>: {html.escape(text)}")
+    out = "\n\n".join(lines)
+    # Telegram messages cap at 4096 chars; keep the most recent part.
+    if len(out) > 3900:
+        out = "…" + out[-3900:]
+    await reply(update, out)
+
+
 async def cmd_followup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
@@ -394,6 +423,7 @@ def main() -> None:
         "agent": cmd_agent,
         "agents": cmd_agents,
         "status": cmd_status,
+        "conversation": cmd_conversation,
         "followup": cmd_followup,
         "stop": cmd_stop,
         "delete": cmd_delete,

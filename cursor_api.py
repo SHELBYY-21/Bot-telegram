@@ -21,7 +21,12 @@ class CursorAPIError(Exception):
 
 
 class CursorClient:
-    def __init__(self, api_key: str, timeout: float = 30.0):
+    def __init__(
+        self,
+        api_key: str,
+        timeout: float = 30.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={
@@ -29,6 +34,7 @@ class CursorClient:
                 "Content-Type": "application/json",
             },
             timeout=timeout,
+            transport=transport,
         )
 
     async def close(self) -> None:
