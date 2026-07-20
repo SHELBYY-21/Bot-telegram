@@ -143,11 +143,14 @@ async def poll_agent(context: ContextTypes.DEFAULT_TYPE) -> None:
 def watch_agent(context: ContextTypes.DEFAULT_TYPE, chat_id: int, agent: dict) -> None:
     if not context.job_queue:
         return
+    name = f"poll:{agent['id']}"
+    if context.job_queue.get_jobs_by_name(name):
+        return
     context.job_queue.run_repeating(
         poll_agent,
         interval=POLL_INTERVAL,
         first=POLL_INTERVAL,
-        name=f"poll:{agent['id']}",
+        name=name,
         data={
             "agent_id": agent["id"],
             "chat_id": chat_id,
@@ -211,7 +214,11 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    data = await cursor(context).list_models()
+    try:
+        data = await cursor(context).list_models()
+    except CursorAPIError as e:
+        await reply(update, html.escape(str(e)))
+        return
     models = data.get("models", data if isinstance(data, list) else [])
     if not models:
         await reply(update, "No models returned.")
@@ -222,7 +229,11 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_repos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    data = await cursor(context).list_repositories()
+    try:
+        data = await cursor(context).list_repositories()
+    except CursorAPIError as e:
+        await reply(update, html.escape(str(e)))
+        return
     repos = data.get("repositories", [])
     if not repos:
         await reply(update, "No repositories returned.")
@@ -267,7 +278,11 @@ async def cmd_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_agents(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    data = await cursor(context).list_agents(limit=10)
+    try:
+        data = await cursor(context).list_agents(limit=10)
+    except CursorAPIError as e:
+        await reply(update, html.escape(str(e)))
+        return
     agents = data.get("agents", [])
     if not agents:
         await reply(update, "No agents found.")
