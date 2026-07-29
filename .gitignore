@@ -1,5 +1,7 @@
 .env
 state.json
+ce_vault.db
+ce_vault.db-*
 __pycache__/
 *.pyc
 .venv/
