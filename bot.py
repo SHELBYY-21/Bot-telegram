@@ -4,6 +4,8 @@ Design language: dark OLED terminal. One card per message. One decision
 per screen. Edit-in-place instead of message spam. Monospace numbers.
 Operators provide a slip image OR a USDT amount — everything else is
 derived from the rate desk automatically.
+
+For the legacy Cursor Cloud Agents bot: LEGACY_CURSOR_BOT=1 python bot.py
 """
 
 from __future__ import annotations

@@ -91,7 +91,18 @@ vault/store.py              Backend factory (sqlite | supabase)
 vault/supabase_ledger.py    Supabase ledger
 vault/ledger.py             SQLite fallback
 vault/cards.py              OLED card UI
+cursor_bot.py               Legacy Cursor Cloud Agents bot
 ```
+
+## Legacy Mode
+
+The original Cursor Cloud Agents bot is preserved for backward compatibility:
+
+```bash
+LEGACY_CURSOR_BOT=1 python bot.py
+```
+
+Requires `CURSOR_API_KEY` in addition to `TELEGRAM_BOT_TOKEN`. See `cursor_bot.py` and `cursor_api.py`.
 
 ## Tests
 
