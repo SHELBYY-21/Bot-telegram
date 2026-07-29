@@ -1,439 +1,555 @@
-"""Telegram bot for launching and managing Cursor Cloud Agents.
+"""CE VAULT — Premium FinTech Operations Console (Telegram).
 
-Commands:
-  /start /help          — usage
-  /repo <url> [ref]     — set the default repository for this chat
-  /model <name>         — set the default model for this chat
-  /models               — list available models
-  /repos                — list repositories the API key can access
-  /agent <prompt>       — launch a cloud agent on the configured repo
-  /agents               — list recent agents
-  /status <id>          — show one agent's status
-  /conversation <id>    — show an agent's conversation history
-  /followup <id> <text> — send follow-up instructions to an agent
-  /stop <id>            — stop a running agent
-  /delete <id>          — delete an agent
-  /me                   — show Cursor API key info
+Not a chatbot. One screen = one decision. Cards edit in place.
+
+Inputs staff may provide:
+  • payment slip photo
+  • OR a USDT amount
+
+Buy Rate is never requested — always calculated automatically.
 """
 
 from __future__ import annotations
 
-import asyncio
-import html
-import json
 import logging
 import os
-from pathlib import Path
+import re
 
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
-from cursor_api import CursorAPIError, CursorClient
+from ce_vault import cards, flow, keyboards, messaging, ocr
+from ce_vault.config import allowed_user_ids, ledger_path, require_telegram_token
+from ce_vault.ledger import Ledger
+from ce_vault.rates import current_rates, quote_from_thb
+from ce_vault.theme import TxStatus
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO
 )
-logger = logging.getLogger("bot")
+logger = logging.getLogger("ce_vault")
 
-STATE_FILE = Path(os.environ.get("STATE_FILE", "state.json"))
-
-# Statuses that mean the agent is done and polling can stop.
-TERMINAL_STATUSES = {"FINISHED", "COMPLETED", "ERROR", "FAILED", "EXPIRED", "STOPPED", "CANCELLED"}
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
-
-
-# --- per-chat settings persistence ---------------------------------------
-
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except json.JSONDecodeError:
-            logger.warning("state file corrupt, starting fresh")
-    return {}
-
-
-def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2))
-
-
-def chat_settings(state: dict, chat_id: int) -> dict:
-    return state.setdefault(str(chat_id), {})
+USDT_RE = re.compile(
+    r"^(?:usdt\s*)?(\d+(?:\.\d+)?)\s*(?:usdt)?$",
+    re.IGNORECASE,
+)
 
 
 # --- auth ----------------------------------------------------------------
 
-def allowed_user_ids() -> set[int]:
-    raw = os.environ.get("ALLOWED_USER_IDS", "").strip()
-    return {int(x) for x in raw.replace(",", " ").split()} if raw else set()
-
-
 def authorized(update: Update) -> bool:
     allowed = allowed_user_ids()
     if not allowed:
-        return True  # no allowlist configured — open bot
+        return True
     return bool(update.effective_user) and update.effective_user.id in allowed
 
 
-# --- formatting ----------------------------------------------------------
-
-def fmt_agent(agent: dict) -> str:
-    lines = [
-        f"<b>{html.escape(agent.get('name') or agent.get('id', '?'))}</b>",
-        f"id: <code>{html.escape(str(agent.get('id', '?')))}</code>",
-        f"status: <b>{html.escape(str(agent.get('status', 'UNKNOWN')))}</b>",
-    ]
-    source = agent.get("source") or {}
-    if source.get("repository"):
-        lines.append(f"repo: {html.escape(source['repository'])}")
-    target = agent.get("target") or {}
-    if target.get("branchName"):
-        lines.append(f"branch: <code>{html.escape(target['branchName'])}</code>")
-    if target.get("prUrl"):
-        lines.append(f"PR: {html.escape(target['prUrl'])}")
-    if agent.get("summary"):
-        lines.append(f"summary: {html.escape(agent['summary'])}")
-    return "\n".join(lines)
+def ledger(context: ContextTypes.DEFAULT_TYPE) -> Ledger:
+    return context.application.bot_data["ledger"]
 
 
-async def reply(update: Update, text: str) -> None:
-    assert update.effective_message
-    await update.effective_message.reply_text(
-        text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
-    )
-
-
-def cursor(context: ContextTypes.DEFAULT_TYPE) -> CursorClient:
-    return context.application.bot_data["cursor"]
-
-
-# --- background status polling -------------------------------------------
-
-async def poll_agent(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Repeating job: watch one agent until it reaches a terminal status."""
-    job = context.job
-    assert job and job.data
-    agent_id: str = job.data["agent_id"]
-    chat_id: int = job.data["chat_id"]
-    try:
-        agent = await cursor(context).get_agent(agent_id)
-    except CursorAPIError as e:
-        logger.warning("poll failed for %s: %s", agent_id, e)
-        if e.status_code == 404:
-            job.schedule_removal()
-        return
-    status = str(agent.get("status", "")).upper()
-    last = job.data.get("last_status")
-    if status != last:
-        job.data["last_status"] = status
-        await context.bot.send_message(
-            chat_id,
-            fmt_agent(agent),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-    if status in TERMINAL_STATUSES:
-        job.schedule_removal()
-
-
-def watch_agent(context: ContextTypes.DEFAULT_TYPE, chat_id: int, agent: dict) -> None:
-    if not context.job_queue:
-        return
-    name = f"poll:{agent['id']}"
-    if context.job_queue.get_jobs_by_name(name):
-        return
-    context.job_queue.run_repeating(
-        poll_agent,
-        interval=POLL_INTERVAL,
-        first=POLL_INTERVAL,
-        name=name,
-        data={
-            "agent_id": agent["id"],
-            "chat_id": chat_id,
-            "last_status": str(agent.get("status", "")).upper(),
-        },
-    )
-
-
-# --- command handlers ----------------------------------------------------
-
-HELP = (
-    "Cursor Cloud Agents bot.\n\n"
-    "/repo &lt;url&gt; [ref] — set default repository\n"
-    "/model &lt;name&gt; — set default model\n"
-    "/models — list available models\n"
-    "/repos — list accessible repositories\n"
-    "/agent &lt;prompt&gt; — launch a cloud agent\n"
-    "/agents — list recent agents\n"
-    "/status &lt;id&gt; — agent status\n"
-    "/conversation &lt;id&gt; — agent conversation history\n"
-    "/followup &lt;id&gt; &lt;text&gt; — send follow-up\n"
-    "/stop &lt;id&gt; — stop agent\n"
-    "/delete &lt;id&gt; — delete agent\n"
-    "/me — API key info"
-)
-
+# --- commands ------------------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    await reply(update, HELP)
+    await messaging.show_typing(update, context)
+    store = ledger(context)
+    text = cards.console_home(
+        balance_usdt=store.get_balance(),
+        open_count=store.open_count(update.effective_chat.id if update.effective_chat else None),
+        settled_today=store.settled_today_count(
+            update.effective_chat.id if update.effective_chat else None
+        ),
+    )
+    # Fresh home card — clear previous track so we don't mutate an old tx card
+    context.chat_data["console"] = {}
+    await messaging.send_or_edit_card(update, context, text, keyboard=keyboards.home_keyboard())
 
 
-async def cmd_repo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    if not context.args:
-        await reply(update, "Usage: /repo &lt;github-url&gt; [ref]")
-        return
-    state = context.application.bot_data["state"]
-    settings = chat_settings(state, update.effective_chat.id)
-    settings["repository"] = context.args[0]
-    settings["ref"] = context.args[1] if len(context.args) > 1 else None
-    save_state(state)
-    ref = settings["ref"] or "default branch"
-    await reply(update, f"Repository set to {html.escape(settings['repository'])} ({html.escape(ref)})")
+    await cmd_start(update, context)
 
 
-async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_rates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    if not context.args:
-        await reply(update, "Usage: /model &lt;model-name&gt;")
-        return
-    state = context.application.bot_data["state"]
-    settings = chat_settings(state, update.effective_chat.id)
-    settings["model"] = context.args[0]
-    save_state(state)
-    await reply(update, f"Model set to <code>{html.escape(settings['model'])}</code>")
+    import html as _html
+
+    from ce_vault import PRODUCT, TAGLINE
+    from ce_vault.theme import RULE
+
+    buy, sell = current_rates()
+    sample = quote_from_thb(1000)
+    text = "\n".join(
+        [
+            f"<b>{PRODUCT}</b>",
+            f"<i>{TAGLINE}</i>",
+            RULE,
+            f"<b>Buy Rate</b>\n<code>{_html.escape(f'{buy:,.2f}')}</code>",
+            "",
+            f"<b>Sell Rate</b>\n<code>{_html.escape(f'{sell:,.2f}')}</code>",
+            "",
+            f"<b>Profit</b>\n<code>{_html.escape(f'{sample.profit_pct:+.2f}%')}</code>",
+            RULE,
+            "<i>Rates apply automatically. Never enter Buy Rate.</i>",
+        ]
+    )
+    await messaging.send_or_edit_card(update, context, text)
 
 
-async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    try:
-        data = await cursor(context).list_models()
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    models = data.get("models", data if isinstance(data, list) else [])
-    if not models:
-        await reply(update, "No models returned.")
-        return
-    await reply(update, "\n".join(f"• <code>{html.escape(str(m))}</code>" for m in models))
+    await cmd_start(update, context)
 
 
-async def cmd_repos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    try:
-        data = await cursor(context).list_repositories()
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    repos = data.get("repositories", [])
-    if not repos:
-        await reply(update, "No repositories returned.")
-        return
-    lines = []
-    for r in repos[:50]:
-        if isinstance(r, dict):
-            lines.append(f"• {html.escape(r.get('repository') or r.get('url') or str(r))}")
-        else:
-            lines.append(f"• {html.escape(str(r))}")
-    await reply(update, "\n".join(lines))
-
-
-async def cmd_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    prompt = " ".join(context.args or [])
-    if not prompt:
-        await reply(update, "Usage: /agent &lt;prompt&gt;")
-        return
-    state = context.application.bot_data["state"]
-    settings = chat_settings(state, update.effective_chat.id)
-    repository = settings.get("repository") or os.environ.get("DEFAULT_REPOSITORY")
-    if not repository:
-        await reply(update, "No repository configured. Set one with /repo &lt;url&gt; first.")
-        return
-    try:
-        agent = await cursor(context).create_agent(
-            prompt_text=prompt,
-            repository=repository,
-            ref=settings.get("ref"),
-            model=settings.get("model") or os.environ.get("DEFAULT_MODEL"),
-            auto_create_pr=os.environ.get("AUTO_CREATE_PR", "").lower() in ("1", "true", "yes"),
-        )
-    except CursorAPIError as e:
-        await reply(update, f"Failed to launch agent: {html.escape(str(e))}")
-        return
-    watch_agent(context, update.effective_chat.id, agent)
-    await reply(update, "Agent launched 🚀\n" + fmt_agent(agent))
-
-
-async def cmd_agents(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    try:
-        data = await cursor(context).list_agents(limit=10)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    agents = data.get("agents", [])
-    if not agents:
-        await reply(update, "No agents found.")
-        return
-    blocks = [fmt_agent(a) for a in agents]
-    await reply(update, "\n\n".join(blocks))
-
-
-async def _require_id(update: Update, context: ContextTypes.DEFAULT_TYPE, usage: str) -> str | None:
-    if not context.args:
-        await reply(update, usage)
-        return None
-    return context.args[0]
-
-
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    agent_id = await _require_id(update, context, "Usage: /status &lt;agent-id&gt;")
-    if not agent_id:
-        return
-    try:
-        agent = await cursor(context).get_agent(agent_id)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    await reply(update, fmt_agent(agent))
-
-
-async def cmd_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    agent_id = await _require_id(update, context, "Usage: /conversation &lt;agent-id&gt;")
-    if not agent_id:
-        return
-    try:
-        data = await cursor(context).get_conversation(agent_id)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    messages = data.get("messages", [])
-    if not messages:
-        await reply(update, "No messages in this conversation.")
-        return
-    lines = []
-    for m in messages:
-        role = m.get("type") or m.get("role") or "message"
-        text = m.get("text") or ""
-        lines.append(f"<b>{html.escape(str(role))}</b>: {html.escape(text)}")
-    out = "\n\n".join(lines)
-    # Telegram messages cap at 4096 chars; keep the most recent part.
-    if len(out) > 3900:
-        out = "…" + out[-3900:]
-    await reply(update, out)
-
-
-async def cmd_followup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
     if not context.args or len(context.args) < 2:
-        await reply(update, "Usage: /followup &lt;agent-id&gt; &lt;instructions&gt;")
+        text = cards.error_card(
+            problem="Missing receiver",
+            cause="History needs bank and last4",
+            action="Usage: /history SCB 3376",
+        )
+        await messaging.send_or_edit_card(update, context, text)
         return
-    agent_id, text = context.args[0], " ".join(context.args[1:])
-    try:
-        await cursor(context).add_followup(agent_id, text)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
+    bank, last4 = context.args[0].upper(), context.args[1]
+    profile = ledger(context).receiver_profile(bank, last4)
+    if not profile:
+        text = cards.error_card(
+            problem="Receiver not found",
+            cause=f"{bank} ••••{last4} has no settled history",
+            action="Settle a transaction first",
+        )
+        await messaging.send_or_edit_card(update, context, text)
         return
-    watch_agent(context, update.effective_chat.id, {"id": agent_id, "status": "RUNNING"})
-    await reply(update, f"Follow-up sent to <code>{html.escape(agent_id)}</code>")
+    await messaging.send_or_edit_card(update, context, cards.history_card(profile))
 
 
-async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_ledger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    agent_id = await _require_id(update, context, "Usage: /stop &lt;agent-id&gt;")
-    if not agent_id:
+    if not context.args:
+        text = cards.error_card(
+            problem="Missing Ledger ID",
+            cause="No identifier supplied",
+            action="Usage: /ledger LV-YYYYMMDD-XXXXXX",
+        )
+        await messaging.send_or_edit_card(update, context, text)
         return
+    tx = ledger(context).get(context.args[0].upper())
+    if not tx:
+        text = cards.error_card(
+            problem="Ledger not found",
+            cause=context.args[0],
+            action="Check the Ledger ID and retry",
+        )
+        await messaging.send_or_edit_card(update, context, text)
+        return
+    messaging.remember_ledger(context, tx.ledger_id)
+    await messaging.send_or_edit_card(
+        update, context, cards.receive_card(tx), keyboard=keyboards.confirm_keyboard(tx.ledger_id)
+    )
+
+
+# --- inbound media / text -----------------------------------------------
+
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update) or not update.effective_message or not update.effective_user:
+        return
+
+    await messaging.show_typing(update, context)
+    # Loading card first — then edit through OCR → confirmation
+    context.chat_data["console"] = {}
+    loading = await messaging.send_or_edit_card(update, context, cards.loading_card("RECEIVING"))
+
+    photo = update.effective_message.photo[-1]
+    tg_file = await context.bot.get_file(photo.file_id)
+    image_bytes = bytes(await tg_file.download_as_bytearray())
+    caption = update.effective_message.caption or ""
+
+    await messaging.send_or_edit_card(
+        update, context, cards.loading_card("OCR"), message_id=loading.message_id
+    )
+
+    result, digest = await ocr.analyze_slip(image_bytes, caption=caption)
+    store = ledger(context)
+
+    duplicate = store.find_by_slip_hash(digest)
+    if duplicate and duplicate.status != TxStatus.DELETED.value:
+        text = cards.error_card(
+            problem="Duplicate slip",
+            cause=f"Matches {duplicate.ledger_id}",
+            action="Use Edit on the original or send a new slip",
+        )
+        await messaging.send_or_edit_card(update, context, text, message_id=loading.message_id)
+        return
+
+    tx = flow.build_from_ocr(
+        store,
+        result,
+        slip_hash=digest,
+        staff_id=update.effective_user.id,
+        staff_name=update.effective_user.full_name or "",
+        chat_id=update.effective_chat.id,
+        image_file_id=photo.file_id,
+    )
+    messaging.remember_ledger(context, tx.ledger_id)
+
+    # Repeated receiver warning folded into OCR confidence warnings display via status
+    if tx.bank and tx.last4:
+        prior = store.receiver_tx_count(tx.bank, tx.last4)
+        if prior >= 1:
+            warnings = list(tx.ocr.get("warnings") or [])
+            warnings.append(f"Repeated receiver · {prior} prior")
+            tx.ocr["warnings"] = warnings
+            store.update(tx)
+
+    # OCR card, then transition to confirmation (single decision screen)
+    await messaging.send_or_edit_card(
+        update, context, cards.ocr_card(tx), message_id=loading.message_id
+    )
+
+    # Brief progress: edit into confirmation card (one card, one decision)
+    conf = cards.confirmation_card(tx)
+    if result.confidence < 90:
+        # Stay on confirmation but operator sees WARN in confidence field
+        pass
+    await messaging.send_or_edit_card(
+        update,
+        context,
+        conf,
+        keyboard=keyboards.confirm_keyboard(tx.ledger_id),
+        message_id=loading.message_id,
+    )
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update) or not update.effective_message or not update.effective_user:
+        return
+
+    raw = (update.effective_message.text or "").strip()
+    if not raw or raw.startswith("/"):
+        return
+
+    await messaging.show_typing(update, context)
+    store = ledger(context)
+    edit_mode = messaging.get_edit_mode(context)
+    active_id = messaging.active_ledger_id(context)
+
+    # Edit mode: operator sends corrected THB or receiver line
+    if edit_mode and active_id:
+        tx = store.get(active_id)
+        if not tx:
+            messaging.set_edit_mode(context, None)
+            text = cards.error_card(
+                problem="Ledger expired",
+                cause=active_id,
+                action="Send a new slip",
+            )
+            await messaging.send_or_edit_card(update, context, text)
+            return
+
+        if edit_mode == "thb":
+            try:
+                thb_val = float(
+                    raw.replace(",", "")
+                    .replace("THB", "")
+                    .replace("thb", "")
+                    .replace("บาท", "")
+                    .replace("฿", "")
+                    .strip()
+                )
+            except ValueError:
+                thb_val = None
+            if thb_val is None or thb_val <= 0:
+                text = cards.error_card(
+                    problem="Invalid THB",
+                    cause=raw,
+                    action="Send a numeric THB amount",
+                )
+                await messaging.send_or_edit_card(update, context, text)
+                return
+            flow.apply_thb_edit(tx, thb_val)
+            if tx.ocr:
+                tx.ocr["amount_thb"] = tx.thb
+            store.update(tx)
+            messaging.set_edit_mode(context, None)
+            await messaging.send_or_edit_card(
+                update,
+                context,
+                cards.confirmation_card(tx),
+                keyboard=keyboards.confirm_keyboard(tx.ledger_id),
+            )
+            return
+
+        if edit_mode == "recv":
+            # Format: NAME | BANK | LAST4   or   BANK LAST4
+            parts = [p.strip() for p in re.split(r"[|,/]+", raw) if p.strip()]
+            if len(parts) >= 3:
+                tx.receiver_name, tx.bank, tx.last4 = parts[0], parts[1].upper(), parts[2][-4:]
+            elif len(parts) == 2:
+                tx.bank, tx.last4 = parts[0].upper(), parts[1][-4:]
+            else:
+                tokens = raw.split()
+                if len(tokens) >= 2 and tokens[-1].isdigit():
+                    tx.last4 = tokens[-1][-4:]
+                    tx.bank = tokens[-2].upper()
+                    tx.receiver_name = " ".join(tokens[:-2]) or tx.receiver_name
+                else:
+                    tx.receiver_name = raw
+            if tx.ocr:
+                tx.ocr["receiver_name"] = tx.receiver_name
+                tx.ocr["bank"] = tx.bank
+                tx.ocr["last4"] = tx.last4
+            store.update(tx)
+            messaging.set_edit_mode(context, None)
+            await messaging.send_or_edit_card(
+                update,
+                context,
+                cards.confirmation_card(tx),
+                keyboard=keyboards.confirm_keyboard(tx.ledger_id),
+            )
+            return
+
+    # USDT amount entry
+    m = USDT_RE.match(raw.strip())
+    if m:
+        usdt_amount = float(m.group(1))
+        if usdt_amount <= 0:
+            text = cards.error_card(
+                problem="Invalid USDT",
+                cause=raw,
+                action="Send a positive USDT amount",
+            )
+            await messaging.send_or_edit_card(update, context, text)
+            return
+        context.chat_data["console"] = {}
+        loading = await messaging.send_or_edit_card(update, context, cards.loading_card("QUOTING"))
+        tx = flow.build_from_usdt(
+            store,
+            usdt_amount,
+            staff_id=update.effective_user.id,
+            staff_name=update.effective_user.full_name or "",
+            chat_id=update.effective_chat.id,
+        )
+        messaging.remember_ledger(context, tx.ledger_id)
+        await messaging.send_or_edit_card(
+            update,
+            context,
+            cards.receive_card(tx),
+            keyboard=keyboards.confirm_keyboard(tx.ledger_id),
+            message_id=loading.message_id,
+        )
+        return
+
+    # Bare THB amount (creates receive without OCR)
     try:
-        await cursor(context).stop_agent(agent_id)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
+        maybe = float(raw.replace(",", "").replace("฿", "").strip())
+    except ValueError:
+        maybe = None
+    if maybe and maybe >= 1 and ("thb" in raw.lower() or "บาท" in raw or "฿" in raw or maybe >= 20):
+        # Treat large plain numbers / explicit THB as slip amount without image
+        context.chat_data["console"] = {}
+        quote = quote_from_thb(maybe)
+        from ce_vault.ledger import new_ledger_id
+        from ce_vault.models import Transaction
+
+        tx = Transaction(
+            ledger_id=new_ledger_id(),
+            status=TxStatus.RECEIVED.value,
+            thb=quote.thb,
+            usdt=quote.usdt,
+            buy_rate=quote.buy_rate,
+            sell_rate=quote.sell_rate,
+            profit_pct=quote.profit_pct,
+            staff_id=update.effective_user.id,
+            staff_name=update.effective_user.full_name or "",
+            chat_id=update.effective_chat.id,
+            confidence=0.0,
+        )
+        store.create(tx)
+        messaging.remember_ledger(context, tx.ledger_id)
+        await messaging.send_or_edit_card(
+            update,
+            context,
+            cards.receive_card(tx),
+            keyboard=keyboards.confirm_keyboard(tx.ledger_id),
+        )
         return
-    await reply(update, f"Stopped <code>{html.escape(agent_id)}</code>")
+
+    text = cards.error_card(
+        problem="Unrecognized input",
+        cause=raw[:120],
+        action="Send a slip photo — or a USDT amount",
+    )
+    await messaging.send_or_edit_card(update, context, text)
 
 
-async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+# --- callbacks -----------------------------------------------------------
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update) or not update.callback_query:
         return
-    agent_id = await _require_id(update, context, "Usage: /delete &lt;agent-id&gt;")
-    if not agent_id:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    store = ledger(context)
+
+    if data == "console:rates":
+        await cmd_rates(update, context)
         return
-    try:
-        await cursor(context).delete_agent(agent_id)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
+    if data == "console:open":
+        await cmd_start(update, context)
         return
-    await reply(update, f"Deleted <code>{html.escape(agent_id)}</code>")
+
+    parts = data.split(":")
+    if len(parts) < 2 or parts[0] != "tx":
+        return
+    action = parts[1]
+
+    if action == "history" and len(parts) >= 4:
+        bank, last4 = parts[2], parts[3]
+        profile = store.receiver_profile(bank, last4)
+        if not profile:
+            text = cards.error_card(
+                problem="Receiver not found",
+                cause=f"{bank} ••••{last4}",
+                action="No settled history yet",
+            )
+            await messaging.send_or_edit_card(update, context, text)
+            return
+        await messaging.send_or_edit_card(update, context, cards.history_card(profile))
+        return
+
+    if action == "done":
+        await cmd_start(update, context)
+        return
+
+    if len(parts) < 3:
+        return
+    ledger_id = parts[2]
+    tx = store.get(ledger_id)
+    if not tx:
+        text = cards.error_card(
+            problem="Ledger not found",
+            cause=ledger_id,
+            action="Send a new slip",
+        )
+        await messaging.send_or_edit_card(update, context, text)
+        return
+
+    messaging.remember_ledger(context, ledger_id)
+
+    if action == "confirm":
+        await messaging.show_typing(update, context)
+        await messaging.send_or_edit_card(update, context, cards.loading_card("SETTLING"))
+        settled, balance = store.settle(ledger_id)
+        await messaging.send_or_edit_card(
+            update,
+            context,
+            cards.success_card(settled, balance_usdt=balance),
+            keyboard=keyboards.success_keyboard(settled.ledger_id, settled.bank, settled.last4),
+        )
+        messaging.set_edit_mode(context, None)
+        return
+
+    if action == "edit":
+        tx.status = TxStatus.EDITING.value
+        store.update(tx)
+        messaging.set_edit_mode(context, "thb")
+        await messaging.send_or_edit_card(
+            update, context, cards.edit_card(tx), keyboard=keyboards.edit_keyboard(tx.ledger_id)
+        )
+        return
+
+    if action == "edit_thb":
+        messaging.set_edit_mode(context, "thb")
+        await messaging.send_or_edit_card(
+            update, context, cards.edit_card(tx), keyboard=keyboards.edit_keyboard(tx.ledger_id)
+        )
+        return
+
+    if action == "edit_recv":
+        messaging.set_edit_mode(context, "recv")
+        await messaging.send_or_edit_card(
+            update, context, cards.edit_card(tx), keyboard=keyboards.edit_keyboard(tx.ledger_id)
+        )
+        return
+
+    if action == "cancel":
+        await messaging.send_or_edit_card(
+            update, context, cards.delete_card(tx), keyboard=keyboards.delete_keyboard(tx.ledger_id)
+        )
+        return
+
+    if action == "delete":
+        deleted = store.soft_delete(ledger_id)
+        text = cards.error_card(
+            problem="Entry deleted",
+            cause=deleted.ledger_id,
+            action="Removed from active ledger",
+        )
+        await messaging.send_or_edit_card(update, context, text)
+        context.chat_data["console"] = {}
+        return
+
+    if action == "keep":
+        await messaging.send_or_edit_card(
+            update,
+            context,
+            cards.confirmation_card(tx),
+            keyboard=keyboards.confirm_keyboard(tx.ledger_id),
+        )
+        return
 
 
-async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    try:
-        info = await cursor(context).me()
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    await reply(update, f"<pre>{html.escape(json.dumps(info, indent=2))}</pre>")
-
-
-# --- app lifecycle -------------------------------------------------------
+# --- lifecycle -----------------------------------------------------------
 
 async def on_shutdown(application: Application) -> None:
-    client: CursorClient = application.bot_data["cursor"]
-    await client.close()
+    store: Ledger = application.bot_data.get("ledger")
+    if store:
+        store.close()
+
+
+def build_app(token: str | None = None, db_path: str | os.PathLike | None = None) -> Application:
+    application = (
+        Application.builder()
+        .token(token or require_telegram_token())
+        .post_shutdown(on_shutdown)
+        .build()
+    )
+    application.bot_data["ledger"] = Ledger(db_path or ledger_path())
+
+    application.add_handler(CommandHandler(["start", "help", "console"], cmd_start))
+    application.add_handler(CommandHandler("rates", cmd_rates))
+    application.add_handler(CommandHandler("balance", cmd_balance))
+    application.add_handler(CommandHandler("history", cmd_history))
+    application.add_handler(CommandHandler("ledger", cmd_ledger))
+    application.add_handler(CallbackQueryHandler(on_callback))
+    application.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    return application
 
 
 def main() -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    api_key = os.environ.get("CURSOR_API_KEY")
-    if not token or not api_key:
-        raise SystemExit("TELEGRAM_BOT_TOKEN and CURSOR_API_KEY must be set")
-
-    application = Application.builder().token(token).post_shutdown(on_shutdown).build()
-    application.bot_data["cursor"] = CursorClient(api_key)
-    application.bot_data["state"] = load_state()
-
-    handlers = {
-        "start": cmd_start,
-        "help": cmd_start,
-        "repo": cmd_repo,
-        "model": cmd_model,
-        "models": cmd_models,
-        "repos": cmd_repos,
-        "agent": cmd_agent,
-        "agents": cmd_agents,
-        "status": cmd_status,
-        "conversation": cmd_conversation,
-        "followup": cmd_followup,
-        "stop": cmd_stop,
-        "delete": cmd_delete,
-        "me": cmd_me,
-    }
-    for name, fn in handlers.items():
-        application.add_handler(CommandHandler(name, fn))
-
-    logger.info("bot starting (polling)")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Optional: keep CURSOR_API_KEY unused — FinTech console is the primary product.
+    # cursor_api.py remains for backward-compatible library use.
+    _ = os.environ.get("CURSOR_API_KEY")
+    app = build_app()
+    logger.info("CE VAULT console starting")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
