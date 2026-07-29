@@ -33,28 +33,37 @@ Buy rate is never requested during a transaction. The rate desk publishes once v
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env   # fill TELEGRAM_BOT_TOKEN
+cp .env.example .env
+# Required: TELEGRAM_BOT_TOKEN
+# Recommended: SUPABASE_SERVICE_ROLE_KEY (Dashboard → Project Settings → API)
 set -a && source .env && set +a
 python bot.py
 ```
 
-Set `ALLOWED_USER_IDS` to lock the console to staff Telegram IDs.
+### Ledger backends
 
-Optional: set `OCR_API_KEY` (or `OPENAI_API_KEY`) for Vision OCR on slip photos. Without it, the console parses captions / pasted slip text.
+| Mode | When |
+|---|---|
+| **Supabase** | `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (or `LEDGER_BACKEND=supabase`) |
+| **SQLite** | fallback / `LEDGER_BACKEND=sqlite` → `data/vault.db` |
+
+Linked project: Supabase **Bot-telegram** (`cewntchvtnuyxvekivwk`) — `transactions`, `admins`, `rates`, `receivers`, …
+
+When `ALLOWED_USER_IDS` is empty and Supabase is active, allowlist comes from `admins.telegram_user_id`.
+
+Optional: set `OCR_API_KEY` for Vision OCR. Without it, captions / pasted slip text are parsed.
 
 ## Architecture
 
 ```
-bot.py                 Telegram console (edit-in-place UX)
+bot.py                      Telegram console (edit-in-place UX)
 vault/
-  cards.py             One-card renderers (Receive, OCR, Success, History, Error, Edit, Delete)
-  theme.py             Status pipeline + design tokens
-  formatting.py        Monospace money / crypto helpers
-  keyboards.py         Confirm / Edit / Settle actions
-  ledger.py            SQLite WAL ledger + receiver history
-  rates.py             Auto USDT + profit from desk rates
-  ocr.py               Slip parse + optional Vision API
-cursor_api.py          Legacy Cursor Cloud Agents client (backward compatible)
+  cards.py                  One-card renderers
+  store.py                  Backend factory (sqlite | supabase)
+  ledger.py                 SQLite WAL ledger
+  supabase_ledger.py        Supabase PostgREST ledger
+  rates.py / ocr.py / theme.py / keyboards.py
+cursor_api.py               Legacy Cursor Cloud Agents client
 ```
 
 ## Tests

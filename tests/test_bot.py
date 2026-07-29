@@ -11,6 +11,19 @@ def test_allowed_user_ids_parsing(monkeypatch):
     assert bot.allowed_user_ids() == set()
 
 
+def test_create_ledger_defaults_to_sqlite(monkeypatch, tmp_path):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    monkeypatch.setenv("LEDGER_BACKEND", "sqlite")
+    monkeypatch.setenv("LEDGER_DB", str(tmp_path / "t.db"))
+    from vault.ledger import Ledger
+    from vault.store import create_ledger
+
+    store = create_ledger()
+    assert isinstance(store, Ledger)
+
+
 def test_parse_status():
     assert bot.parse_status("OCR VERIFIED") == Status.OCR_VERIFIED
     assert bot.parse_status("WAITING USDT") == Status.WAITING_USDT
