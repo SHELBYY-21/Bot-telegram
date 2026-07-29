@@ -1,6 +1,7 @@
 import json
 
 import bot
+from ce_vault import cards
 
 
 def test_fmt_agent_escapes_and_includes_fields():
@@ -19,12 +20,14 @@ def test_fmt_agent_escapes_and_includes_fields():
     assert "RUNNING" in out
     assert "https://github.com/o/r/pull/2" in out
     assert "did things" in out
+    assert "CE VAULT" in out
 
 
 def test_fmt_agent_minimal():
     out = bot.fmt_agent({"id": "bc_2"})
     assert "bc_2" in out
-    assert "UNKNOWN" in out
+    # unknown maps through status rail / label
+    assert "UNKNOWN" in out or "CE VAULT" in out
 
 
 def test_allowed_user_ids_parsing(monkeypatch):
@@ -53,3 +56,9 @@ def test_load_state_corrupt_file(tmp_path, monkeypatch):
     state_file.write_text("{not json")
     monkeypatch.setattr(bot, "STATE_FILE", state_file)
     assert bot.load_state() == {}
+
+
+def test_fmt_agent_uses_card_module():
+    assert bot.fmt_agent({"id": "x", "status": "FINISHED"}) == cards.agent_card(
+        {"id": "x", "status": "FINISHED"}
+    )

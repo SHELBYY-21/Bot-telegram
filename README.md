@@ -1,44 +1,78 @@
-# Bot-telegram
+# CE VAULT
 
-Telegram bot for launching and managing [Cursor Cloud Agents](https://cursor.com/docs/cloud-agent/api/endpoints) from chat.
+Premium FinTech Operations Console for Telegram — OLED, typography-first, one card per decision.
 
-## What it does
+Not a chatbot UI. Operates like a Bloomberg / Stripe / Linear console inside Telegram.
 
-Wraps the Cursor Cloud Agents API (`https://api.cursor.com`):
+## Operations
 
-| Command | API endpoint |
+| Action | Input |
 |---|---|
-| `/agent <prompt>` | `POST /v0/agents` — launch an agent on the configured repo |
-| `/agents` | `GET /v0/agents` — list recent agents |
-| `/status <id>` | `GET /v0/agents/{id}` |
-| `/conversation <id>` | `GET /v0/agents/{id}/conversation` |
-| `/followup <id> <text>` | `POST /v0/agents/{id}/followup` |
-| `/stop <id>` | `POST /v0/agents/{id}/stop` |
-| `/delete <id>` | `DELETE /v0/agents/{id}` |
-| `/models` | `GET /v0/models` |
-| `/repos` | `GET /v0/repositories` |
-| `/me` | `GET /v0/me` |
-| `/repo <url> [ref]` | set the default repository for the chat |
-| `/model <name>` | set the default model for the chat |
+| Slip intake | Send a transfer slip photo (caption optional) |
+| USDT intake | `/usdt <amount>` |
+| Rate board | `/rates` |
+| Lookup | `/ledger <id>` |
+| Receiver history | `/history <last4>` |
+| Latest entry | `/recent` |
+| Void | `/void <id>` |
 
-After launching an agent (or sending a follow-up) the bot polls its status every 30 seconds and pushes updates to the chat — including the PR URL when the agent finishes.
+Staff never enters Buy Rate. Everything is calculated from `SELL_RATE` + `RATE_SPREAD`.
+
+### Status rail
+
+```
+● RECEIVED
+● OCR VERIFIED
+● WAITING USDT
+○ SETTLED
+```
+
+Only the active step is emphasized. Cards edit in place — no message spam.
+
+### Cards
+
+Receive · OCR · Confirmation · Success · History · Error · Edit · Delete
+
+Each response is a single card.
+
+## Architecture
+
+```
+bot.py                 Telegram wiring + Cursor agent commands
+ce_vault/
+  design.py            Palette + status vocabulary
+  cards.py             Single-purpose HTML card renderers
+  rates.py             Automatic buy/sell/USDT quotes
+  ocr.py               Vision / caption slip intake
+  ledger.py            SQLite ledger + receiver history
+  keyboards.py         Confirm / Edit / Cancel
+  messaging.py         Edit-in-place + typing
+  handlers.py          FinTech command + callback flows
+cursor_api.py          Cursor Cloud Agents client (backward compatible)
+```
 
 ## Setup
 
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Create a Cursor API key (Cursor Dashboard → Integrations → API Keys).
-3. Configure and run:
-
 ```bash
-python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env   # fill in tokens
+cp .env.example .env   # fill TELEGRAM_BOT_TOKEN
 set -a && source .env && set +a
 python bot.py
 ```
 
-Set `ALLOWED_USER_IDS` in `.env` to restrict the bot to specific Telegram users — leave it empty and anyone who finds the bot can spend your Cursor credits.
+Optional:
+
+- `OPENAI_API_KEY` — vision OCR for slips (otherwise caption/heuristic)
+- `CURSOR_API_KEY` — enables `/agent` cloud-agent commands
+- `ALLOWED_USER_IDS` — lock the console to staff Telegram IDs
+
+## Cursor Agents (compat)
+
+Existing commands still work, restyled into CE VAULT cards:
+
+`/repo` `/model` `/models` `/repos` `/agent` `/agents` `/status` `/conversation` `/followup` `/stop` `/delete` `/me`
+
+Status updates edit the same message instead of flooding the chat.
 
 ## Tests
 
@@ -47,8 +81,6 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-## Files
+## Ledger schema
 
-- `bot.py` — Telegram bot (python-telegram-bot, long polling) and status-watch job queue
-- `cursor_api.py` — async client for the Cloud Agents API
-- `state.json` — per-chat repo/model settings (created at runtime, git-ignored)
+Each entry stores: Ledger ID, slip hash, OCR payload, receiver, bank, last4, THB, USDT, buy/sell rates, profit, confidence, staff, timestamps, and an event history.
