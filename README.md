@@ -5,6 +5,43 @@ Premium FinTech Operations Console on Telegram.
 Not a chatbot. A dark OLED ledger terminal for THB → USDT desk operations:
 slip ingest, OCR verification, automatic rate math, settlement, and receiver history.
 
+## เริ่มใช้งานแบบง่ายสุด (3 ขั้น)
+
+1. **Token บอท** — https://t.me/BotFather  
+2. **Keys** — https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/settings/api  
+   คัดลอก `Publishable key` + `Secret key` (รูปแบบใหม่ `sb_publishable_…` / `sb_secret_…`)  
+3. **รัน**
+
+```bash
+cp .env.example .env
+# วางค่าลง .env แล้ว:
+set -a && source .env && set +a
+pip install -r requirements.txt
+python bot.py
+```
+
+ใน `.env` ใส่แค่นี้:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:AA...
+SUPABASE_URL=https://cewntchvtnuyxvekivwk.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
+SUPABASE_JWKS_URL=https://cewntchvtnuyxvekivwk.supabase.co/auth/v1/.well-known/jwks.json
+```
+
+ทดลองทันทีในแชทบอท: ส่ง `/demo`
+
+| ลิงก์ลัด | URL |
+|---|---|
+| BotFather | https://t.me/BotFather |
+| Supabase API keys | https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/settings/api |
+| Supabase Table Editor | https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/editor |
+| PR (Supabase) | https://github.com/SHELBYY-21/Bot-telegram/pull/15 |
+
+> โปรเจกต์นี้เป็น **Python** — ใช้ `SUPABASE_SECRET_KEY` กับ PostgREST โดยตรง ไม่ต้อง `npm install @supabase/server`  
+> ไม่มี secret key ก็รันได้ (fallback เป็น SQLite ที่ `data/vault.db`)
+
 ## Operator flow
 
 1. Send a **bank slip image** (or paste slip text), **or** type a **USDT amount**
@@ -27,34 +64,33 @@ Buy rate is never requested during a transaction. The rate desk publishes once v
 | `/ledger [id]` | Recent entries or one ledger card |
 | `/delete <id>` | Delete confirmation |
 
-## Setup
+## Setup (รายละเอียด)
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env   # fill TELEGRAM_BOT_TOKEN
+cp .env.example .env
 set -a && source .env && set +a
 python bot.py
 ```
 
-Set `ALLOWED_USER_IDS` to lock the console to staff Telegram IDs.
+### Ledger backends
 
-Optional: set `OCR_API_KEY` (or `OPENAI_API_KEY`) for Vision OCR on slip photos. Without it, the console parses captions / pasted slip text.
+| Mode | When |
+|---|---|
+| **Supabase** | มี `SUPABASE_URL` + `SUPABASE_SECRET_KEY` (หรือ legacy `SUPABASE_SERVICE_ROLE_KEY`) |
+| **SQLite** | ไม่มี secret key / `LEDGER_BACKEND=sqlite` |
+
+เมื่อ `ALLOWED_USER_IDS` ว่างและใช้ Supabase — ดึง allowlist จาก `admins.telegram_user_id` อัตโนมัติ
 
 ## Architecture
 
 ```
-bot.py                 Telegram console (edit-in-place UX)
-vault/
-  cards.py             One-card renderers (Receive, OCR, Success, History, Error, Edit, Delete)
-  theme.py             Status pipeline + design tokens
-  formatting.py        Monospace money / crypto helpers
-  keyboards.py         Confirm / Edit / Settle actions
-  ledger.py            SQLite WAL ledger + receiver history
-  rates.py             Auto USDT + profit from desk rates
-  ocr.py               Slip parse + optional Vision API
-cursor_api.py          Legacy Cursor Cloud Agents client (backward compatible)
+bot.py                      Telegram console
+vault/store.py              Backend factory (sqlite | supabase)
+vault/supabase_ledger.py    Supabase ledger
+vault/ledger.py             SQLite fallback
+vault/cards.py              OLED card UI
 ```
 
 ## Tests
@@ -63,10 +99,3 @@ cursor_api.py          Legacy Cursor Cloud Agents client (backward compatible)
 pip install -r requirements-dev.txt
 pytest -q
 ```
-
-## Design language
-
-- Dark OLED hierarchy, typography-first
-- Monospace for every number
-- Status rail: `● RECEIVED` → `● OCR VERIFIED` → `● WAITING USDT` → `● SETTLED` (one glow)
-- Never spam — edit the previous console message whenever possible

@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
 
 from telegram import Message, Update
 from telegram.constants import ChatAction, ParseMode
@@ -32,9 +31,9 @@ from vault.keyboards import (
     edit_fields_keyboard,
     settle_keyboard,
 )
-from vault.ledger import Ledger
 from vault.ocr import DEMO_SLIP_TEXT, analyze_slip, parse_slip_text
 from vault.rates import RateQuote, compute_from_thb, compute_from_usdt
+from vault.store import LedgerStore, create_ledger
 from vault.theme import Status
 
 logging.basicConfig(
@@ -42,7 +41,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ce_vault")
 
-LEDGER_PATH = Path(os.environ.get("LEDGER_DB", "data/vault.db"))
 USDT_AMOUNT_RE = re.compile(
     r"^(?:usdt\s*)?([0-9]+(?:\.[0-9]+)?)\s*(?:usdt)?$", re.I
 )
@@ -50,19 +48,30 @@ USDT_AMOUNT_RE = re.compile(
 
 # --- auth ----------------------------------------------------------------
 
-def allowed_user_ids() -> set[int]:
+def allowed_user_ids(store: LedgerStore | None = None) -> set[int]:
     raw = os.environ.get("ALLOWED_USER_IDS", "").strip()
-    return {int(x) for x in raw.replace(",", " ").split()} if raw else set()
+    if raw:
+        return {int(x) for x in raw.replace(",", " ").split()}
+    # Fall back to Supabase admins.telegram_user_id when configured
+    if store is not None and hasattr(store, "list_admin_telegram_ids"):
+        try:
+            return set(store.list_admin_telegram_ids())  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.warning("could not load admin allowlist: %s", exc)
+    return set()
 
 
-def authorized(update: Update) -> bool:
-    allowed = allowed_user_ids()
+def authorized(update: Update, context: ContextTypes.DEFAULT_TYPE | None = None) -> bool:
+    store = None
+    if context is not None:
+        store = context.application.bot_data.get("ledger")
+    allowed = allowed_user_ids(store)
     if not allowed:
         return True
     return bool(update.effective_user) and update.effective_user.id in allowed
 
 
-def ledger(context: ContextTypes.DEFAULT_TYPE) -> Ledger:
+def ledger(context: ContextTypes.DEFAULT_TYPE) -> LedgerStore:
     return context.application.bot_data["ledger"]
 
 
@@ -260,14 +269,14 @@ async def begin_from_usdt(
 # --- commands ------------------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     context.user_data.pop("console_message_id", None)
     await send_card(update, context, cards.welcome_card())
 
 
 async def cmd_rates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     q = quote(context)
     bal = ledger(context).get_balance()
@@ -279,7 +288,7 @@ async def cmd_rates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_setrates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     if not context.args or len(context.args) < 2:
         await send_card(
@@ -319,7 +328,7 @@ async def cmd_setrates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     if context.args:
         try:
@@ -346,7 +355,7 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     store = ledger(context)
     if context.args:
@@ -413,7 +422,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_ledger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     if not context.args:
         rows = ledger(context).list_recent(10)
@@ -447,13 +456,13 @@ async def cmd_ledger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_demo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Offline demo using a fixture slip — no image required."""
-    if not authorized(update):
+    if not authorized(update, context):
         return
     await begin_from_ocr(update, context, text=DEMO_SLIP_TEXT, file_unique_id="demo-slip-v1")
 
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     if not context.args:
         await send_card(
@@ -491,7 +500,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # --- message handlers ----------------------------------------------------
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     assert update.effective_message and update.effective_message.photo
     # Clear previous console message so a new intake starts clean
@@ -511,7 +520,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     assert update.effective_message and update.effective_message.document
     doc = update.effective_message.document
@@ -540,7 +549,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     assert update.effective_message and update.effective_message.text
     text = update.effective_message.text.strip()
@@ -644,7 +653,7 @@ async def apply_edit(
 # --- callbacks -----------------------------------------------------------
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
+    if not authorized(update, context):
         return
     query = update.callback_query
     assert query and query.data
@@ -798,9 +807,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 # --- lifecycle -----------------------------------------------------------
 
-def build_app(token: str, db_path: Path | None = None) -> Application:
-    application = Application.builder().token(token).build()
-    application.bot_data["ledger"] = Ledger(db_path or LEDGER_PATH)
+async def on_shutdown(application: Application) -> None:
+    store = application.bot_data.get("ledger")
+    if store is not None and hasattr(store, "close"):
+        store.close()
+
+
+def build_app(token: str, ledger_store: LedgerStore | None = None) -> Application:
+    application = (
+        Application.builder().token(token).post_shutdown(on_shutdown).build()
+    )
+    application.bot_data["ledger"] = ledger_store or create_ledger()
 
     application.add_handler(CommandHandler(["start", "help"], cmd_start))
     application.add_handler(CommandHandler("rates", cmd_rates))
