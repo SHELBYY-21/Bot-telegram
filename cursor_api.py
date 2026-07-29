@@ -1,5 +1,8 @@
 """Thin async client for the Cursor Cloud Agents API.
 
+Retained for backward compatibility. The Telegram surface is now CE VAULT
+(`bot.py` + `ce_vault/`); this module is unused by the ops console.
+
 Endpoint reference: https://cursor.com/docs/cloud-agent/api/endpoints
 All requests are authenticated with `Authorization: Bearer <CURSOR_API_KEY>`.
 """
