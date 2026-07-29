@@ -29,13 +29,17 @@ class LedgerStore(Protocol):
 
 
 def _supabase_secret() -> str:
-    """Prefer new secret key format, fall back to legacy service_role JWT."""
-    return (
-        os.environ.get("SUPABASE_SECRET_KEY")
-        or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-        or os.environ.get("SUPABASE_KEY")
-        or ""
-    ).strip()
+    """Server key for PostgREST. Prefer legacy JWT service_role when present
+    (widely supported by /rest/v1); otherwise use new sb_secret_ key.
+    Never ship these to a browser client.
+    """
+    jwt = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    secret = (os.environ.get("SUPABASE_SECRET_KEY") or "").strip()
+    legacy = (os.environ.get("SUPABASE_KEY") or "").strip()
+    # JWT service_role still the most compatible for Python PostgREST clients
+    if jwt.startswith("eyJ"):
+        return jwt
+    return secret or jwt or legacy
 
 
 def create_ledger() -> LedgerStore:
