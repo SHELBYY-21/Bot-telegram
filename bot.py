@@ -1,438 +1,695 @@
-"""Telegram bot for launching and managing Cursor Cloud Agents.
+"""CE VAULT — Premium FinTech Operations Console for Telegram.
 
-Commands:
-  /start /help          — usage
-  /repo <url> [ref]     — set the default repository for this chat
-  /model <name>         — set the default model for this chat
-  /models               — list available models
-  /repos                — list repositories the API key can access
-  /agent <prompt>       — launch a cloud agent on the configured repo
-  /agents               — list recent agents
-  /status <id>          — show one agent's status
-  /conversation <id>    — show an agent's conversation history
-  /followup <id> <text> — send follow-up instructions to an agent
-  /stop <id>            — stop a running agent
-  /delete <id>          — delete an agent
-  /me                   — show Cursor API key info
+Staff provide a transfer slip or USDT amount. Rates, profit, and ledger
+entries are computed automatically. One card per screen.
 """
 
 from __future__ import annotations
 
 import asyncio
-import html
-import json
 import logging
 import os
-from pathlib import Path
+import re
+from decimal import Decimal, InvalidOperation
 
-from telegram import Update
-from telegram.constants import ParseMode
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
-from cursor_api import CursorAPIError, CursorClient
+from config import allowed_user_ids, confidence_warning_threshold
+from vault.cards import CardRenderer
+from vault.ledger import LedgerStore
+from vault.models import PipelineStatus, TransactionDraft
+from vault.ocr import process_slip, slip_hash
+from vault.rates import RateEngine
+from vault.session import SessionStore
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO
 )
-logger = logging.getLogger("bot")
+logger = logging.getLogger("ce_vault")
 
-STATE_FILE = Path(os.environ.get("STATE_FILE", "state.json"))
+USDT_PATTERN = re.compile(r"^\s*(\d+(?:\.\d{1,8})?)\s*(?:usdt)?\s*$", re.I)
+LEDGER_PATTERN = re.compile(r"^LDG-\d{8}-\d{4}$", re.I)
 
-# Statuses that mean the agent is done and polling can stop.
-TERMINAL_STATUSES = {"FINISHED", "COMPLETED", "ERROR", "FAILED", "EXPIRED", "STOPPED", "CANCELLED"}
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
-
-
-# --- per-chat settings persistence ---------------------------------------
-
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except json.JSONDecodeError:
-            logger.warning("state file corrupt, starting fresh")
-    return {}
+CB_CONFIRM = "vault:confirm"
+CB_EDIT = "vault:edit"
+CB_CANCEL = "vault:cancel"
+CB_DELETE_CONFIRM = "vault:delete:yes"
+CB_DELETE_CANCEL = "vault:delete:no"
+CB_HISTORY = "vault:history"
 
 
-def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2))
-
-
-def chat_settings(state: dict, chat_id: int) -> dict:
-    return state.setdefault(str(chat_id), {})
-
-
-# --- auth ----------------------------------------------------------------
-
-def allowed_user_ids() -> set[int]:
-    raw = os.environ.get("ALLOWED_USER_IDS", "").strip()
-    return {int(x) for x in raw.replace(",", " ").split()} if raw else set()
+# --- auth ------------------------------------------------------------------
 
 
 def authorized(update: Update) -> bool:
     allowed = allowed_user_ids()
     if not allowed:
-        return True  # no allowlist configured — open bot
+        return True
     return bool(update.effective_user) and update.effective_user.id in allowed
 
 
-# --- formatting ----------------------------------------------------------
-
-def fmt_agent(agent: dict) -> str:
-    lines = [
-        f"<b>{html.escape(agent.get('name') or agent.get('id', '?'))}</b>",
-        f"id: <code>{html.escape(str(agent.get('id', '?')))}</code>",
-        f"status: <b>{html.escape(str(agent.get('status', 'UNKNOWN')))}</b>",
-    ]
-    source = agent.get("source") or {}
-    if source.get("repository"):
-        lines.append(f"repo: {html.escape(source['repository'])}")
-    target = agent.get("target") or {}
-    if target.get("branchName"):
-        lines.append(f"branch: <code>{html.escape(target['branchName'])}</code>")
-    if target.get("prUrl"):
-        lines.append(f"PR: {html.escape(target['prUrl'])}")
-    if agent.get("summary"):
-        lines.append(f"summary: {html.escape(agent['summary'])}")
-    return "\n".join(lines)
+# --- helpers ---------------------------------------------------------------
 
 
-async def reply(update: Update, text: str) -> None:
-    assert update.effective_message
-    await update.effective_message.reply_text(
-        text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+def rates(context: ContextTypes.DEFAULT_TYPE) -> RateEngine:
+    return context.application.bot_data["rates"]
+
+
+def ledger(context: ContextTypes.DEFAULT_TYPE) -> LedgerStore:
+    return context.application.bot_data["ledger"]
+
+
+def sessions(context: ContextTypes.DEFAULT_TYPE) -> SessionStore:
+    return context.application.bot_data["sessions"]
+
+
+def cards() -> CardRenderer:
+    return CardRenderer()
+
+
+async def send_card(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    keyboard: InlineKeyboardMarkup | None = None,
+    replace: bool = True,
+) -> int | None:
+    """Send or edit a single active card for this chat."""
+    assert update.effective_chat
+    session = sessions(context).get(update.effective_chat.id)
+
+    if replace and session.active_message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=session.active_message_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+            sessions(context).save()
+            return session.active_message_id
+        except Exception:
+            logger.debug("edit failed, sending new card", exc_info=True)
+
+    msg = await context.bot.send_message(
+        update.effective_chat.id,
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+    session.active_message_id = msg.message_id
+    sessions(context).save()
+    return msg.message_id
+
+
+async def typing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat:
+        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+
+
+def confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Confirm", callback_data=CB_CONFIRM),
+                InlineKeyboardButton("Edit", callback_data=CB_EDIT),
+            ],
+            [InlineKeyboardButton("Cancel", callback_data=CB_CANCEL)],
+        ]
     )
 
 
-def cursor(context: ContextTypes.DEFAULT_TYPE) -> CursorClient:
-    return context.application.bot_data["cursor"]
+def delete_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Delete", callback_data=CB_DELETE_CONFIRM),
+                InlineKeyboardButton("Keep", callback_data=CB_DELETE_CANCEL),
+            ]
+        ]
+    )
 
 
-# --- background status polling -------------------------------------------
+def history_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Receiver History", callback_data=CB_HISTORY)]]
+    )
 
-async def poll_agent(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Repeating job: watch one agent until it reaches a terminal status."""
-    job = context.job
-    assert job and job.data
-    agent_id: str = job.data["agent_id"]
-    chat_id: int = job.data["chat_id"]
-    try:
-        agent = await cursor(context).get_agent(agent_id)
-    except CursorAPIError as e:
-        logger.warning("poll failed for %s: %s", agent_id, e)
-        if e.status_code == 404:
-            job.schedule_removal()
-        return
-    status = str(agent.get("status", "")).upper()
-    last = job.data.get("last_status")
-    if status != last:
-        job.data["last_status"] = status
-        await context.bot.send_message(
-            chat_id,
-            fmt_agent(agent),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
+
+def new_draft(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    staff_id: int | None = None,
+    source: str = "slip",
+) -> TransactionDraft:
+    engine = rates(context)
+    return TransactionDraft(
+        ledger_id=ledger(context).next_ledger_id(),
+        thb=Decimal("0.00"),
+        usdt=Decimal("0.0000"),
+        buy_rate=engine.buy_rate,
+        sell_rate=engine.sell_rate,
+        staff_id=staff_id,
+        source=source,
+        status=PipelineStatus.RECEIVED,
+    )
+
+
+async def animate_loading(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    ledger_id: str,
+    stages: list[tuple[str, int]],
+) -> None:
+    for stage, progress in stages:
+        await typing(update, context)
+        await send_card(
+            update,
+            context,
+            cards().loading_card(ledger_id, stage, progress),
+            replace=True,
         )
-    if status in TERMINAL_STATUSES:
-        job.schedule_removal()
+        await asyncio.sleep(0.35)
 
 
-def watch_agent(context: ContextTypes.DEFAULT_TYPE, chat_id: int, agent: dict) -> None:
-    if not context.job_queue:
+# --- flows -----------------------------------------------------------------
+
+
+async def show_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    engine = rates(context)
+    totals = ledger(context).totals()
+    text = cards().dashboard_card(
+        totals,
+        (engine.buy_rate, engine.sell_rate, engine.profit_pct),
+    )
+    await send_card(update, context, text, replace=False)
+
+
+async def process_slip_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    image_bytes: bytes,
+    file_id: str,
+) -> None:
+    assert update.effective_user
+    session = sessions(context).get(update.effective_chat.id)
+    draft = new_draft(
+        context,
+        staff_id=update.effective_user.id,
+        source="slip",
+    )
+    session.draft = draft
+    sessions(context).save()
+
+    await animate_loading(
+        update,
+        context,
+        draft.ledger_id,
+        [
+            ("Scanning slip", 2),
+            ("Extracting fields", 5),
+            ("Verifying OCR", 8),
+        ],
+    )
+
+    digest = slip_hash(image_bytes)
+    draft.slip_hash = digest
+    draft.slip_file_id = file_id
+    draft.duplicate_slip = ledger(context).slip_exists(digest)
+
+    try:
+        ocr = await process_slip(image_bytes)
+    except Exception as exc:
+        logger.exception("OCR failed")
+        await send_card(
+            update,
+            context,
+            cards().error_card(
+                "OCR failed",
+                str(exc),
+                "Resend a clearer slip image",
+            ),
+            replace=True,
+        )
+        session.clear()
+        sessions(context).save()
         return
-    name = f"poll:{agent['id']}"
-    if context.job_queue.get_jobs_by_name(name):
-        return
-    context.job_queue.run_repeating(
-        poll_agent,
-        interval=POLL_INTERVAL,
-        first=POLL_INTERVAL,
-        name=name,
-        data={
-            "agent_id": agent["id"],
-            "chat_id": chat_id,
-            "last_status": str(agent.get("status", "")).upper(),
-        },
+
+    engine = rates(context)
+    calc = engine.from_thb(ocr.amount_thb)
+    draft.thb = calc["thb"]
+    draft.usdt = calc["usdt"]
+    draft.buy_rate = calc["buy_rate"]
+    draft.sell_rate = calc["sell_rate"]
+    draft.receiver_name = ocr.receiver_name
+    draft.bank = ocr.bank
+    draft.last4 = ocr.last4
+    draft.ocr_confidence = ocr.confidence
+    draft.low_confidence = ocr.confidence < confidence_warning_threshold()
+    draft.status = PipelineStatus.OCR_VERIFIED
+
+    history = ledger(context).receiver_history(draft.bank, draft.last4)
+    draft.repeated_receiver = history is not None and history.transaction_count > 0
+
+    await send_card(update, context, cards().ocr_card(draft), replace=True)
+    await asyncio.sleep(0.4)
+
+    draft.status = PipelineStatus.WAITING_USDT
+    session.mode = "confirm"
+    sessions(context).save()
+
+    keyboard = confirm_keyboard()
+    if history:
+        keyboard = InlineKeyboardMarkup(
+            [
+                *confirm_keyboard().inline_keyboard,
+                *history_keyboard().inline_keyboard,
+            ]
+        )
+
+    await send_card(
+        update,
+        context,
+        cards().transaction_card(draft),
+        keyboard=keyboard,
+        replace=True,
     )
 
 
-# --- command handlers ----------------------------------------------------
+async def process_usdt_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    usdt_amount: Decimal,
+) -> None:
+    assert update.effective_user
+    session = sessions(context).get(update.effective_chat.id)
+    draft = session.draft
 
-HELP = (
-    "Cursor Cloud Agents bot.\n\n"
-    "/repo &lt;url&gt; [ref] — set default repository\n"
-    "/model &lt;name&gt; — set default model\n"
-    "/models — list available models\n"
-    "/repos — list accessible repositories\n"
-    "/agent &lt;prompt&gt; — launch a cloud agent\n"
-    "/agents — list recent agents\n"
-    "/status &lt;id&gt; — agent status\n"
-    "/conversation &lt;id&gt; — agent conversation history\n"
-    "/followup &lt;id&gt; &lt;text&gt; — send follow-up\n"
-    "/stop &lt;id&gt; — stop agent\n"
-    "/delete &lt;id&gt; — delete agent\n"
-    "/me — API key info"
-)
+    if (
+        draft
+        and session.mode != "edit"
+        and draft.status == PipelineStatus.WAITING_USDT
+    ):
+        engine = rates(context)
+        calc = engine.from_usdt(usdt_amount)
+        draft.usdt = calc["usdt"]
+        draft.thb = calc["thb"]
+        draft.buy_rate = calc["buy_rate"]
+        draft.sell_rate = calc["sell_rate"]
+        session.mode = "confirm"
+        sessions(context).save()
+        await send_card(
+            update,
+            context,
+            cards().transaction_card(draft),
+            keyboard=confirm_keyboard(),
+            replace=True,
+        )
+        return
+
+    draft = new_draft(
+        context,
+        staff_id=update.effective_user.id,
+        source="usdt",
+    )
+    engine = rates(context)
+    calc = engine.from_usdt(usdt_amount)
+    draft.thb = calc["thb"]
+    draft.usdt = calc["usdt"]
+    draft.buy_rate = calc["buy_rate"]
+    draft.sell_rate = calc["sell_rate"]
+    draft.status = PipelineStatus.WAITING_USDT
+    session.draft = draft
+    session.mode = "confirm"
+    sessions(context).save()
+
+    await animate_loading(
+        update,
+        context,
+        draft.ledger_id,
+        [
+            ("Computing THB", 4),
+            ("Applying rates", 7),
+            ("Ready for review", 10),
+        ],
+    )
+
+    await send_card(
+        update,
+        context,
+        cards().transaction_card(draft),
+        keyboard=confirm_keyboard(),
+        replace=True,
+    )
+
+
+async def settle_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    session = sessions(context).get(update.effective_chat.id)
+    draft = session.draft
+    if not draft:
+        return
+
+    if draft.duplicate_slip:
+        await send_card(
+            update,
+            context,
+            cards().error_card(
+                "Duplicate slip",
+                "This slip was already settled",
+                "Verify slip or cancel",
+            ),
+            replace=True,
+        )
+        return
+
+    record = ledger(context).insert_settled(draft.to_record())
+    session.clear()
+    sessions(context).save()
+    await send_card(
+        update,
+        context,
+        cards().success_card(record),
+        replace=True,
+    )
+
+
+# --- command handlers ------------------------------------------------------
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    await reply(update, HELP)
+    sessions(context).get(update.effective_chat.id).clear()
+    sessions(context).save()
+    await show_dashboard(update, context)
 
 
-async def cmd_repo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_ledger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    if not context.args:
-        await reply(update, "Usage: /repo &lt;github-url&gt; [ref]")
+    ledger_id = " ".join(context.args) if context.args else ""
+    if not ledger_id:
+        recent = ledger(context).recent(limit=5)
+        if not recent:
+            await send_card(
+                update,
+                context,
+                cards().error_card(
+                    "No records",
+                    "Ledger is empty",
+                    "Settle a transaction first",
+                ),
+                replace=False,
+            )
+            return
+        lines = [cards().header(), cards().label("Recent Settlements"), ""]
+        for item in recent:
+            lines.append(
+                f"{cards().mono(item.ledger_id)}  "
+                f"{cards().mono(f'{item.thb:,.2f}')} THB  "
+                f"{cards().mono(f'{item.usdt:.4f}')} USDT"
+            )
+        lines.extend(["", CardRenderer.SEP])
+        await send_card(update, context, "\n".join(lines), replace=False)
         return
-    state = context.application.bot_data["state"]
-    settings = chat_settings(state, update.effective_chat.id)
-    settings["repository"] = context.args[0]
-    settings["ref"] = context.args[1] if len(context.args) > 1 else None
-    save_state(state)
-    ref = settings["ref"] or "default branch"
-    await reply(update, f"Repository set to {html.escape(settings['repository'])} ({html.escape(ref)})")
 
-
-async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    if not context.args:
-        await reply(update, "Usage: /model &lt;model-name&gt;")
-        return
-    state = context.application.bot_data["state"]
-    settings = chat_settings(state, update.effective_chat.id)
-    settings["model"] = context.args[0]
-    save_state(state)
-    await reply(update, f"Model set to <code>{html.escape(settings['model'])}</code>")
-
-
-async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    try:
-        data = await cursor(context).list_models()
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    models = data.get("models", data if isinstance(data, list) else [])
-    if not models:
-        await reply(update, "No models returned.")
-        return
-    await reply(update, "\n".join(f"• <code>{html.escape(str(m))}</code>" for m in models))
-
-
-async def cmd_repos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    try:
-        data = await cursor(context).list_repositories()
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    repos = data.get("repositories", [])
-    if not repos:
-        await reply(update, "No repositories returned.")
-        return
-    lines = []
-    for r in repos[:50]:
-        if isinstance(r, dict):
-            lines.append(f"• {html.escape(r.get('repository') or r.get('url') or str(r))}")
-        else:
-            lines.append(f"• {html.escape(str(r))}")
-    await reply(update, "\n".join(lines))
-
-
-async def cmd_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    prompt = " ".join(context.args or [])
-    if not prompt:
-        await reply(update, "Usage: /agent &lt;prompt&gt;")
-        return
-    state = context.application.bot_data["state"]
-    settings = chat_settings(state, update.effective_chat.id)
-    repository = settings.get("repository") or os.environ.get("DEFAULT_REPOSITORY")
-    if not repository:
-        await reply(update, "No repository configured. Set one with /repo &lt;url&gt; first.")
-        return
-    try:
-        agent = await cursor(context).create_agent(
-            prompt_text=prompt,
-            repository=repository,
-            ref=settings.get("ref"),
-            model=settings.get("model") or os.environ.get("DEFAULT_MODEL"),
-            auto_create_pr=os.environ.get("AUTO_CREATE_PR", "").lower() in ("1", "true", "yes"),
+    record = ledger(context).get(ledger_id.upper())
+    if not record:
+        await send_card(
+            update,
+            context,
+            cards().error_card(
+                "Not found",
+                f"No ledger entry for {ledger_id}",
+                "Check Ledger ID and retry",
+            ),
+            replace=False,
         )
-    except CursorAPIError as e:
-        await reply(update, f"Failed to launch agent: {html.escape(str(e))}")
         return
-    watch_agent(context, update.effective_chat.id, agent)
-    await reply(update, "Agent launched 🚀\n" + fmt_agent(agent))
 
-
-async def cmd_agents(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    try:
-        data = await cursor(context).list_agents(limit=10)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    agents = data.get("agents", [])
-    if not agents:
-        await reply(update, "No agents found.")
-        return
-    blocks = [fmt_agent(a) for a in agents]
-    await reply(update, "\n\n".join(blocks))
-
-
-async def _require_id(update: Update, context: ContextTypes.DEFAULT_TYPE, usage: str) -> str | None:
-    if not context.args:
-        await reply(update, usage)
-        return None
-    return context.args[0]
-
-
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    agent_id = await _require_id(update, context, "Usage: /status &lt;agent-id&gt;")
-    if not agent_id:
-        return
-    try:
-        agent = await cursor(context).get_agent(agent_id)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    await reply(update, fmt_agent(agent))
-
-
-async def cmd_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    agent_id = await _require_id(update, context, "Usage: /conversation &lt;agent-id&gt;")
-    if not agent_id:
-        return
-    try:
-        data = await cursor(context).get_conversation(agent_id)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    messages = data.get("messages", [])
-    if not messages:
-        await reply(update, "No messages in this conversation.")
-        return
-    lines = []
-    for m in messages:
-        role = m.get("type") or m.get("role") or "message"
-        text = m.get("text") or ""
-        lines.append(f"<b>{html.escape(str(role))}</b>: {html.escape(text)}")
-    out = "\n\n".join(lines)
-    # Telegram messages cap at 4096 chars; keep the most recent part.
-    if len(out) > 3900:
-        out = "…" + out[-3900:]
-    await reply(update, out)
-
-
-async def cmd_followup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    if not context.args or len(context.args) < 2:
-        await reply(update, "Usage: /followup &lt;agent-id&gt; &lt;instructions&gt;")
-        return
-    agent_id, text = context.args[0], " ".join(context.args[1:])
-    try:
-        await cursor(context).add_followup(agent_id, text)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    watch_agent(context, update.effective_chat.id, {"id": agent_id, "status": "RUNNING"})
-    await reply(update, f"Follow-up sent to <code>{html.escape(agent_id)}</code>")
-
-
-async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized(update):
-        return
-    agent_id = await _require_id(update, context, "Usage: /stop &lt;agent-id&gt;")
-    if not agent_id:
-        return
-    try:
-        await cursor(context).stop_agent(agent_id)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
-        return
-    await reply(update, f"Stopped <code>{html.escape(agent_id)}</code>")
+    await send_card(
+        update,
+        context,
+        cards().success_card(record),
+        replace=False,
+    )
 
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    agent_id = await _require_id(update, context, "Usage: /delete &lt;agent-id&gt;")
-    if not agent_id:
+    if not context.args:
+        await send_card(
+            update,
+            context,
+            cards().error_card(
+                "Missing Ledger ID",
+                "No ID provided",
+                "Use /delete LDG-YYYYMMDD-0001",
+            ),
+            replace=False,
+        )
         return
-    try:
-        await cursor(context).delete_agent(agent_id)
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
+
+    ledger_id = context.args[0].upper()
+    record = ledger(context).get(ledger_id)
+    if not record:
+        await send_card(
+            update,
+            context,
+            cards().error_card(
+                "Not found",
+                f"No ledger entry for {ledger_id}",
+                "Verify Ledger ID",
+            ),
+            replace=False,
+        )
         return
-    await reply(update, f"Deleted <code>{html.escape(agent_id)}</code>")
+
+    session = sessions(context).get(update.effective_chat.id)
+    session.mode = "delete"
+    session.pending_delete_id = ledger_id
+    sessions(context).save()
+    await send_card(
+        update,
+        context,
+        cards().delete_card(ledger_id),
+        keyboard=delete_keyboard(),
+        replace=False,
+    )
 
 
-async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not authorized(update):
         return
-    try:
-        info = await cursor(context).me()
-    except CursorAPIError as e:
-        await reply(update, html.escape(str(e)))
+    await show_dashboard(update, context)
+
+
+# --- message handlers ------------------------------------------------------
+
+
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update) or not update.effective_message or not update.message:
         return
-    await reply(update, f"<pre>{html.escape(json.dumps(info, indent=2))}</pre>")
+
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    image_bytes = bytes(await file.download_as_bytearray())
+
+    session = sessions(context).get(update.effective_chat.id)
+    if session.mode == "edit" and session.draft:
+        await process_slip_flow(update, context, image_bytes, photo.file_id)
+        return
+
+    await process_slip_flow(update, context, image_bytes, photo.file_id)
 
 
-# --- app lifecycle -------------------------------------------------------
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update) or not update.effective_message or not update.message:
+        return
+
+    text = (update.message.text or "").strip()
+    if text.startswith("/"):
+        return
+
+    usdt_match = USDT_PATTERN.match(text)
+    if usdt_match:
+        try:
+            amount = Decimal(usdt_match.group(1))
+        except InvalidOperation:
+            amount = None
+        if amount and amount > 0:
+            await process_usdt_flow(update, context, amount)
+            return
+
+    if LEDGER_PATTERN.match(text.upper()):
+        context.args = [text.upper()]
+        await cmd_ledger(update, context)
+        return
+
+    await send_card(
+        update,
+        context,
+        cards().error_card(
+            "Unrecognized input",
+            "Expected slip image or USDT amount",
+            "Send slip  ·  12.5342  ·  /start",
+        ),
+        replace=False,
+    )
+
+
+# --- callback handlers -----------------------------------------------------
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update) or not update.callback_query:
+        return
+
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    session = sessions(context).get(update.effective_chat.id)
+
+    if data == CB_CONFIRM:
+        await settle_draft(update, context)
+        return
+
+    if data == CB_CANCEL:
+        session.clear()
+        sessions(context).save()
+        await send_card(
+            update,
+            context,
+            cards().error_card(
+                "Cancelled",
+                "Transaction discarded",
+                "Send a new slip or USDT amount",
+            ),
+            replace=True,
+        )
+        return
+
+    if data == CB_EDIT:
+        if not session.draft:
+            return
+        session.mode = "edit"
+        sessions(context).save()
+        await send_card(
+            update,
+            context,
+            cards().edit_card(session.draft),
+            replace=True,
+        )
+        return
+
+    if data == CB_HISTORY:
+        draft = session.draft
+        if not draft or not draft.bank or not draft.last4:
+            return
+        history = ledger(context).receiver_history(draft.bank, draft.last4)
+        if not history:
+            await send_card(
+                update,
+                context,
+                cards().error_card(
+                    "No history",
+                    "Receiver not found in ledger",
+                    "Continue with confirmation",
+                ),
+                replace=True,
+            )
+            return
+        await send_card(
+            update,
+            context,
+            cards().history_card(history),
+            keyboard=confirm_keyboard(),
+            replace=True,
+        )
+        return
+
+    if data == CB_DELETE_CONFIRM:
+        ledger_id = session.pending_delete_id
+        if not ledger_id:
+            return
+        deleted = ledger(context).delete(ledger_id)
+        session.clear()
+        sessions(context).save()
+        if deleted:
+            await send_card(
+                update,
+                context,
+                cards().error_card(
+                    "Deleted",
+                    f"Removed {ledger_id}",
+                    "Entry removed from ledger",
+                ),
+                replace=True,
+            )
+        else:
+            await send_card(
+                update,
+                context,
+                cards().error_card(
+                    "Delete failed",
+                    f"Could not remove {ledger_id}",
+                    "Retry or contact admin",
+                ),
+                replace=True,
+            )
+        return
+
+    if data == CB_DELETE_CANCEL:
+        session.mode = "idle"
+        session.pending_delete_id = None
+        sessions(context).save()
+        await show_dashboard(update, context)
+
+
+# --- app lifecycle ---------------------------------------------------------
+
 
 async def on_shutdown(application: Application) -> None:
-    client: CursorClient = application.bot_data["cursor"]
-    await client.close()
+    sessions_store: SessionStore = application.bot_data["sessions"]
+    sessions_store.save()
 
 
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    api_key = os.environ.get("CURSOR_API_KEY")
-    if not token or not api_key:
-        raise SystemExit("TELEGRAM_BOT_TOKEN and CURSOR_API_KEY must be set")
+    if not token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN must be set")
 
-    application = Application.builder().token(token).post_shutdown(on_shutdown).build()
-    application.bot_data["cursor"] = CursorClient(api_key)
-    application.bot_data["state"] = load_state()
+    application = (
+        Application.builder().token(token).post_shutdown(on_shutdown).build()
+    )
+    application.bot_data["rates"] = RateEngine()
+    application.bot_data["ledger"] = LedgerStore()
+    application.bot_data["sessions"] = SessionStore()
 
-    handlers = {
-        "start": cmd_start,
-        "help": cmd_start,
-        "repo": cmd_repo,
-        "model": cmd_model,
-        "models": cmd_models,
-        "repos": cmd_repos,
-        "agent": cmd_agent,
-        "agents": cmd_agents,
-        "status": cmd_status,
-        "conversation": cmd_conversation,
-        "followup": cmd_followup,
-        "stop": cmd_stop,
-        "delete": cmd_delete,
-        "me": cmd_me,
-    }
-    for name, fn in handlers.items():
-        application.add_handler(CommandHandler(name, fn))
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("help", cmd_start))
+    application.add_handler(CommandHandler("ledger", cmd_ledger))
+    application.add_handler(CommandHandler("delete", cmd_delete))
+    application.add_handler(CommandHandler("balance", cmd_balance))
+    application.add_handler(CallbackQueryHandler(on_callback))
+    application.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    logger.info("bot starting (polling)")
+    logger.info("CE VAULT starting")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
