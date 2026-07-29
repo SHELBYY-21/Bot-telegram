@@ -23,7 +23,6 @@ from telegram.ext import (
 from ce_vault.config import Settings, load_settings
 from ce_vault.db import LedgerStore
 from ce_vault.messaging import replace_card, show_typing
-from ce_vault.models import OCRResult
 from ce_vault.services.ledger import LedgerService, slip_hash_bytes
 from ce_vault.services.ocr import OCRService
 from ce_vault.services.rates import profit_pct
