@@ -1,8 +1,79 @@
-"""Backward-compatible tests for legacy bot helpers removed in CE VAULT.
+"""Bot-level helpers and auth for CE VAULT console."""
 
-The Cursor API client remains in cursor_api.py; see tests/test_cursor_api.py.
-"""
+import bot
+from vault.theme import Status
 
-import pytest
 
-pytestmark = pytest.mark.skip(reason="Legacy Cursor bot handlers replaced by CE VAULT")
+def test_allowed_user_ids_parsing(monkeypatch):
+    monkeypatch.setenv("ALLOWED_USER_IDS", "1, 2  3,4")
+    assert bot.allowed_user_ids() == {1, 2, 3, 4}
+    monkeypatch.setenv("ALLOWED_USER_IDS", "")
+    assert bot.allowed_user_ids() == set()
+
+
+def test_create_ledger_defaults_to_sqlite(monkeypatch, tmp_path):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    monkeypatch.setenv("LEDGER_BACKEND", "sqlite")
+    monkeypatch.setenv("LEDGER_DB", str(tmp_path / "t.db"))
+    from vault.ledger import Ledger
+    from vault.store import create_ledger
+
+    store = create_ledger()
+    assert isinstance(store, Ledger)
+
+
+def test_create_ledger_prefers_secret_key(monkeypatch):
+    monkeypatch.setenv("LEDGER_BACKEND", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "sb_secret_test")
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    from vault.store import create_ledger
+    from vault.supabase_ledger import SupabaseLedger
+
+    store = create_ledger()
+    assert isinstance(store, SupabaseLedger)
+    store.close()
+
+
+def test_parse_status():
+    assert bot.parse_status("OCR VERIFIED") == Status.OCR_VERIFIED
+    assert bot.parse_status("WAITING USDT") == Status.WAITING_USDT
+    assert bot.parse_status("nope") == Status.RECEIVED
+
+
+def test_tx_card_text_uses_entry_fields():
+    entry = {
+        "id": "LV-20260729-0001",
+        "status": "OCR VERIFIED",
+        "thb": 500,
+        "usdt": 12.5,
+        "buy_rate": 39.89,
+        "sell_rate": 40.0,
+        "profit_pct": 0.28,
+        "bank": "SCB",
+        "last4": "3376",
+        "ocr_confidence": 98.4,
+    }
+    text = bot.tx_card_text(entry)
+    assert "LV-20260729-0001" in text
+    assert "<code>500.00</code>" in text
+    assert "<b>● OCR VERIFIED</b>" in text
+
+
+def test_usdt_amount_regex():
+    assert bot.USDT_AMOUNT_RE.match("12.5 usdt")
+    assert bot.parse_amount("usdt 12") == ("usdt", 12.0)
+    assert not bot.USDT_AMOUNT_RE.match("12.5")
+    assert not bot.USDT_AMOUNT_RE.match("hello")
+
+
+def test_parse_amount():
+    assert bot.parse_amount("12.5342") == ("usdt", 12.5342)
+    assert bot.parse_amount("500") == ("thb", 500.0)
+    assert bot.parse_amount("500 thb") == ("thb", 500.0)
+    assert bot.parse_amount("12.5 usdt") == ("usdt", 12.5)
+    assert bot.parse_amount("usdt 12") == ("usdt", 12.0)
+    assert bot.parse_amount("hello") is None

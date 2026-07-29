@@ -1,7 +1,8 @@
 .env
 state.json
-vault.db
 data/
+*.db
+vault.db
 __pycache__/
 *.pyc
 .venv/
