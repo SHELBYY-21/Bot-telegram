@@ -1,44 +1,47 @@
-# Bot-telegram
+# CE VAULT — FinTech Operations Console (Telegram)
 
-Telegram bot for launching and managing [Cursor Cloud Agents](https://cursor.com/docs/cloud-agent/api/endpoints) from chat.
+Premium THB ↔ USDT desk console. Not a chatbot — card-first, edit-in-place, automatic quoting.
 
-## What it does
+## Console
 
-Wraps the Cursor Cloud Agents API (`https://api.cursor.com`):
-
-| Command | API endpoint |
+| Action | Input |
 |---|---|
-| `/agent <prompt>` | `POST /v0/agents` — launch an agent on the configured repo |
-| `/agents` | `GET /v0/agents` — list recent agents |
-| `/status <id>` | `GET /v0/agents/{id}` |
-| `/conversation <id>` | `GET /v0/agents/{id}/conversation` |
-| `/followup <id> <text>` | `POST /v0/agents/{id}/followup` |
-| `/stop <id>` | `POST /v0/agents/{id}/stop` |
-| `/delete <id>` | `DELETE /v0/agents/{id}` |
-| `/models` | `GET /v0/models` |
-| `/repos` | `GET /v0/repositories` |
-| `/me` | `GET /v0/me` |
-| `/repo <url> [ref]` | set the default repository for the chat |
-| `/model <name>` | set the default model for the chat |
+| Intake slip | Send bank transfer photo (caption optional) |
+| Intake USDT | `12.5342 USDT` |
+| Desk rates | `/rates` or `/rates 39.89 40.00` |
+| Counterparty | `/history SCB 3376` |
+| Open ledger | `/ledger LD-…` |
+| Treasury | `/balance` |
+| Home | `/start` `/console` |
 
-After launching an agent (or sending a follow-up) the bot polls its status every 30 seconds and pushes updates to the chat — including the PR URL when the agent finishes.
+### Pipeline
+
+`RECEIVED → OCR VERIFIED → WAITING USDT → SETTLED`
+
+Only the active stage glows. One card per message. Confirm / Edit / Cancel on the decision screen.
+
+### Automatic quoting
+
+- Buy rate is **never** requested mid-flow.
+- THB from slip → USDT = THB ÷ Buy Rate
+- USDT amount input → THB = USDT × Buy Rate
+- Profit % from Buy/Sell spread
+
+### OCR
+
+- `OCR_PROVIDER=auto` uses OpenAI Vision when `OPENAI_API_KEY` is set, otherwise heuristic parse of caption/text.
+- Confidence below 90% triggers a review alert.
+- Duplicate slips (SHA-256) and repeated receivers are flagged.
 
 ## Setup
-
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Create a Cursor API key (Cursor Dashboard → Integrations → API Keys).
-3. Configure and run:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env   # fill in tokens
+cp .env.example .env   # fill TELEGRAM_BOT_TOKEN
 set -a && source .env && set +a
 python bot.py
 ```
-
-Set `ALLOWED_USER_IDS` in `.env` to restrict the bot to specific Telegram users — leave it empty and anyone who finds the bot can spend your Cursor credits.
 
 ## Tests
 
@@ -47,8 +50,21 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-## Files
+## Layout
 
-- `bot.py` — Telegram bot (python-telegram-bot, long polling) and status-watch job queue
-- `cursor_api.py` — async client for the Cloud Agents API
-- `state.json` — per-chat repo/model settings (created at runtime, git-ignored)
+```
+bot.py                 # entry point
+ce_vault/
+  app.py               # handlers + lifecycle
+  config.py            # settings + design tokens
+  models.py            # ledger domain
+  messaging.py         # edit-in-place cards
+  db/                  # SQLite ledger
+  services/            # rates, OCR, ledger orchestration
+  ui/                  # cards, status rail, keyboards
+cursor_api.py          # legacy Cursor Agents client (optional)
+```
+
+## Ledger fields
+
+Ledger ID · Slip · OCR · Receiver · Bank · Last4 · THB · USDT · Buy Rate · Sell Rate · Profit · Staff · Timestamp · Images · History
