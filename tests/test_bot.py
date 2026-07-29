@@ -1,30 +1,7 @@
-import json
+"""Bot-level helpers and auth for CE VAULT console."""
 
 import bot
-
-
-def test_fmt_agent_escapes_and_includes_fields():
-    agent = {
-        "id": "bc_1",
-        "name": "Fix <script>",
-        "status": "RUNNING",
-        "source": {"repository": "https://github.com/o/r"},
-        "target": {"branchName": "cursor/fix", "prUrl": "https://github.com/o/r/pull/2"},
-        "summary": "did things",
-    }
-    out = bot.fmt_agent(agent)
-    assert "&lt;script&gt;" in out
-    assert "<script>" not in out
-    assert "bc_1" in out
-    assert "RUNNING" in out
-    assert "https://github.com/o/r/pull/2" in out
-    assert "did things" in out
-
-
-def test_fmt_agent_minimal():
-    out = bot.fmt_agent({"id": "bc_2"})
-    assert "bc_2" in out
-    assert "UNKNOWN" in out
+from vault.theme import Status
 
 
 def test_allowed_user_ids_parsing(monkeypatch):
@@ -34,22 +11,33 @@ def test_allowed_user_ids_parsing(monkeypatch):
     assert bot.allowed_user_ids() == set()
 
 
-def test_state_round_trip(tmp_path, monkeypatch):
-    state_file = tmp_path / "state.json"
-    monkeypatch.setattr(bot, "STATE_FILE", state_file)
-
-    state = bot.load_state()
-    assert state == {}
-    settings = bot.chat_settings(state, 42)
-    settings["repository"] = "https://github.com/o/r"
-    bot.save_state(state)
-
-    assert json.loads(state_file.read_text()) == {"42": {"repository": "https://github.com/o/r"}}
-    assert bot.load_state() == {"42": {"repository": "https://github.com/o/r"}}
+def test_parse_status():
+    assert bot.parse_status("OCR VERIFIED") == Status.OCR_VERIFIED
+    assert bot.parse_status("WAITING USDT") == Status.WAITING_USDT
+    assert bot.parse_status("nope") == Status.RECEIVED
 
 
-def test_load_state_corrupt_file(tmp_path, monkeypatch):
-    state_file = tmp_path / "state.json"
-    state_file.write_text("{not json")
-    monkeypatch.setattr(bot, "STATE_FILE", state_file)
-    assert bot.load_state() == {}
+def test_tx_card_text_uses_entry_fields():
+    entry = {
+        "id": "LV-20260729-0001",
+        "status": "OCR VERIFIED",
+        "thb": 500,
+        "usdt": 12.5,
+        "buy_rate": 39.89,
+        "sell_rate": 40.0,
+        "profit_pct": 0.28,
+        "bank": "SCB",
+        "last4": "3376",
+        "ocr_confidence": 98.4,
+    }
+    text = bot.tx_card_text(entry)
+    assert "LV-20260729-0001" in text
+    assert "<code>500.00</code>" in text
+    assert "<b>● OCR VERIFIED</b>" in text
+
+
+def test_usdt_amount_regex():
+    assert bot.USDT_AMOUNT_RE.match("12.5")
+    assert bot.USDT_AMOUNT_RE.match("12.5 USDT")
+    assert bot.USDT_AMOUNT_RE.match("usdt 12")
+    assert not bot.USDT_AMOUNT_RE.match("hello")
