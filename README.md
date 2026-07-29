@@ -1,44 +1,83 @@
-# Bot-telegram
+# CE VAULT — Premium FinTech Operations Console
 
-Telegram bot for launching and managing [Cursor Cloud Agents](https://cursor.com/docs/cloud-agent/api/endpoints) from chat.
+Telegram operations console for THB ↔ USDT settlement.
+Designed like a Bloomberg / Stripe / Linear terminal — not a chatbot.
 
-## What it does
+## Console
 
-Wraps the Cursor Cloud Agents API (`https://api.cursor.com`):
+Every response is **one card**. One screen = one decision.
 
-| Command | API endpoint |
+| Card | Purpose |
 |---|---|
-| `/agent <prompt>` | `POST /v0/agents` — launch an agent on the configured repo |
-| `/agents` | `GET /v0/agents` — list recent agents |
-| `/status <id>` | `GET /v0/agents/{id}` |
-| `/conversation <id>` | `GET /v0/agents/{id}/conversation` |
-| `/followup <id> <text>` | `POST /v0/agents/{id}/followup` |
-| `/stop <id>` | `POST /v0/agents/{id}/stop` |
-| `/delete <id>` | `DELETE /v0/agents/{id}` |
-| `/models` | `GET /v0/models` |
-| `/repos` | `GET /v0/repositories` |
-| `/me` | `GET /v0/me` |
-| `/repo <url> [ref]` | set the default repository for the chat |
-| `/model <name>` | set the default model for the chat |
+| Receive | Inbound slip captured |
+| OCR | Vision result + confidence |
+| Confirmation | Quote ready — Confirm / Edit / Cancel |
+| Success | Settled + updated balance |
+| History | Receiver risk profile |
+| Error | Problem · Cause · Action |
+| Edit / Delete | Mutation surfaces |
 
-After launching an agent (or sending a follow-up) the bot polls its status every 30 seconds and pushes updates to the chat — including the PR URL when the agent finishes.
+### Staff inputs
+
+- Slip image (or pasted slip text)
+- **or** an amount: `500` / `12.5 usdt`
+
+Everything else is automatic (buy rate, sell rate, USDT, profit).
+
+### Commands
+
+| Command | Action |
+|---|---|
+| `/start` | Console help |
+| `/rates` | Active buy/sell spread |
+| `/setrates <buy> <sell>` | Update global rates |
+| `/balance` | USDT inventory / THB collected |
+| `/setbalance <usdt> [thb]` | Set inventory |
+| `/history <last4>` | Receiver history card |
+| `/ledger <id>` | Open a ledger entry |
+| `/recent` | Latest ledger strip |
+
+### Status rail
+
+```
+● RECEIVED
+○ OCR VERIFIED
+○ WAITING USDT
+○ SETTLED
+```
+
+Only the active step glows.
+
+## Architecture
+
+```
+bot.py              Telegram console (edit-in-place cards)
+vault/
+  design.py         OLED tokens, status rail, monospace money
+  cards.py          Single-card renderers
+  ledger.py         SQLite ledger + balance + receiver history
+  rates.py          Automatic quote engine
+  ocr.py            Slip OCR (Vision API or heuristics)
+  models.py         Transaction / OCR domain models
+  console.py        Message edit + inline keyboards
+cursor_api.py       Optional Cursor Cloud Agents client (legacy)
+```
 
 ## Setup
 
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Create a Cursor API key (Cursor Dashboard → Integrations → API Keys).
-3. Configure and run:
-
 ```bash
-python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env   # fill in tokens
+cp .env.example .env   # set TELEGRAM_BOT_TOKEN
 set -a && source .env && set +a
 python bot.py
 ```
 
-Set `ALLOWED_USER_IDS` in `.env` to restrict the bot to specific Telegram users — leave it empty and anyone who finds the bot can spend your Cursor credits.
+Optional:
+
+- `OPENAI_API_KEY` — Vision OCR for slip photos
+- `CURSOR_API_KEY` — keeps legacy `/agent` Cloud Agents commands
+
+Set `ALLOWED_USER_IDS` to restrict operators.
 
 ## Tests
 
@@ -47,8 +86,15 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-## Files
+## Design tokens
 
-- `bot.py` — Telegram bot (python-telegram-bot, long polling) and status-watch job queue
-- `cursor_api.py` — async client for the Cloud Agents API
-- `state.json` — per-chat repo/model settings (created at runtime, git-ignored)
+| Token | Value |
+|---|---|
+| Primary | `#05050A` |
+| Surface | `#101114` |
+| Border | `rgba(255,255,255,.06)` |
+| Gold | `#E5C04A` |
+| Cyan | `#00F0FF` |
+| Success | `#00D26A` |
+| Warning | `#FFB800` |
+| Danger | `#FF4D4F` |
