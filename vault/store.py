@@ -28,21 +28,32 @@ class LedgerStore(Protocol):
     def record_settlement(self, entry_id: str) -> dict | None: ...
 
 
-def create_ledger() -> LedgerStore:
-    """Pick backend from env. Prefer Supabase when URL + service key exist."""
-    backend = (os.environ.get("LEDGER_BACKEND") or "").strip().lower()
-    url = (os.environ.get("SUPABASE_URL") or "").strip()
-    key = (
-        os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+def _supabase_secret() -> str:
+    """Prefer new secret key format, fall back to legacy service_role JWT."""
+    return (
+        os.environ.get("SUPABASE_SECRET_KEY")
+        or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         or os.environ.get("SUPABASE_KEY")
         or ""
     ).strip()
 
-    want_supabase = backend in ("supabase", "remote") or (not backend and url and key)
-    if want_supabase:
+
+def create_ledger() -> LedgerStore:
+    """Pick backend from env. Prefer Supabase when URL + secret key exist."""
+    backend = (os.environ.get("LEDGER_BACKEND") or "").strip().lower()
+    url = (os.environ.get("SUPABASE_URL") or "").strip()
+    key = _supabase_secret()
+
+    want_supabase = backend in ("supabase", "remote", "auto") or (not backend and url and key)
+    # auto with missing key → sqlite
+    if backend in ("", "auto") and not (url and key):
+        want_supabase = False
+    if backend in ("supabase", "remote") or (want_supabase and url and key):
         if not url or not key:
             raise SystemExit(
-                "LEDGER_BACKEND=supabase requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY"
+                "Supabase ledger needs SUPABASE_URL and SUPABASE_SECRET_KEY "
+                "(or SUPABASE_SERVICE_ROLE_KEY). "
+                "Get keys: https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/settings/api"
             )
         from vault.supabase_ledger import SupabaseLedger
 

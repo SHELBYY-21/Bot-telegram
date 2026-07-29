@@ -7,25 +7,27 @@ slip ingest, OCR verification, automatic rate math, settlement, and receiver his
 
 ## เริ่มใช้งานแบบง่ายสุด (3 ขั้น)
 
-1. **Token บอท** — เปิด [@BotFather](https://t.me/BotFather) → `/newbot` หรือคัดลอก token บอทเดิม
-2. **Service key (Supabase)** — เปิดลิงก์นี้แล้วกด **Reveal** ที่ `service_role`  
-   https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/settings/api
+1. **Token บอท** — https://t.me/BotFather  
+2. **Keys** — https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/settings/api  
+   คัดลอก `Publishable key` + `Secret key` (รูปแบบใหม่ `sb_publishable_…` / `sb_secret_…`)  
 3. **รัน**
 
 ```bash
 cp .env.example .env
-# วาง token 2 ตัวลง .env แล้ว:
+# วางค่าลง .env แล้ว:
 set -a && source .env && set +a
 pip install -r requirements.txt
 python bot.py
 ```
 
-ใน `.env` ใส่แค่นี้ก็พอ:
+ใน `.env` ใส่แค่นี้:
 
 ```bash
 TELEGRAM_BOT_TOKEN=123456:AA...
 SUPABASE_URL=https://cewntchvtnuyxvekivwk.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=eyJ...   # จากลิงก์ข้อ 2
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
+SUPABASE_JWKS_URL=https://cewntchvtnuyxvekivwk.supabase.co/auth/v1/.well-known/jwks.json
 ```
 
 ทดลองทันทีในแชทบอท: ส่ง `/demo`
@@ -35,10 +37,10 @@ SUPABASE_SERVICE_ROLE_KEY=eyJ...   # จากลิงก์ข้อ 2
 | BotFather | https://t.me/BotFather |
 | Supabase API keys | https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/settings/api |
 | Supabase Table Editor | https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/editor |
-| PR ล่าสุด (Supabase) | https://github.com/SHELBYY-21/Bot-telegram/pull/15 |
-| Telegram Bot API | https://core.telegram.org/bots/api |
+| PR (Supabase) | https://github.com/SHELBYY-21/Bot-telegram/pull/15 |
 
-> ไม่มี service key ก็รันได้ — จะใช้ SQLite ในเครื่องแทน (`data/vault.db`)
+> โปรเจกต์นี้เป็น **Python** — ใช้ `SUPABASE_SECRET_KEY` กับ PostgREST โดยตรง ไม่ต้อง `npm install @supabase/server`  
+> ไม่มี secret key ก็รันได้ (fallback เป็น SQLite ที่ `data/vault.db`)
 
 ## Operator flow
 
@@ -76,8 +78,8 @@ python bot.py
 
 | Mode | When |
 |---|---|
-| **Supabase** | มี `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` |
-| **SQLite** | ไม่มี service key / `LEDGER_BACKEND=sqlite` |
+| **Supabase** | มี `SUPABASE_URL` + `SUPABASE_SECRET_KEY` (หรือ legacy `SUPABASE_SERVICE_ROLE_KEY`) |
+| **SQLite** | ไม่มี secret key / `LEDGER_BACKEND=sqlite` |
 
 เมื่อ `ALLOWED_USER_IDS` ว่างและใช้ Supabase — ดึง allowlist จาก `admins.telegram_user_id` อัตโนมัติ
 
