@@ -1,44 +1,65 @@
-# Bot-telegram
+# CE VAULT
 
-Telegram bot for launching and managing [Cursor Cloud Agents](https://cursor.com/docs/cloud-agent/api/endpoints) from chat.
+Premium FinTech Operations Console for Telegram. Process THB/USDT settlements from payment slips or USDT amounts — rates, profit, and ledger entries are calculated automatically.
 
-## What it does
+Designed like an enterprise financial operating system: one card per screen, monospace numbers, status pipeline, and in-place message editing.
 
-Wraps the Cursor Cloud Agents API (`https://api.cursor.com`):
+## Features
 
-| Command | API endpoint |
+- **Slip OCR** — extract receiver, bank, last4, and THB amount with confidence scoring
+- **USDT entry** — send an amount (e.g. `12.5342`) and THB is calculated automatically
+- **Auto rates** — buy/sell rates and profit % from configuration; never prompted
+- **Ledger** — SQLite storage for every transaction (slip hash, OCR, receiver, rates, staff, timestamps)
+- **Receiver history** — transaction count, volume, first/last seen, risk level
+- **Duplicate detection** — rejects already-processed slips
+- **Premium cards** — Receive, OCR, Transaction, Success, History, Error, Edit, Delete layouts
+
+## Status pipeline
+
+```
+○ RECEIVED
+○ OCR VERIFIED
+● WAITING USDT    ← only the active step is highlighted
+○ SETTLED
+```
+
+## Commands
+
+| Command | Description |
 |---|---|
-| `/agent <prompt>` | `POST /v0/agents` — launch an agent on the configured repo |
-| `/agents` | `GET /v0/agents` — list recent agents |
-| `/status <id>` | `GET /v0/agents/{id}` |
-| `/conversation <id>` | `GET /v0/agents/{id}/conversation` |
-| `/followup <id> <text>` | `POST /v0/agents/{id}/followup` |
-| `/stop <id>` | `POST /v0/agents/{id}/stop` |
-| `/delete <id>` | `DELETE /v0/agents/{id}` |
-| `/models` | `GET /v0/models` |
-| `/repos` | `GET /v0/repositories` |
-| `/me` | `GET /v0/me` |
-| `/repo <url> [ref]` | set the default repository for the chat |
-| `/model <name>` | set the default model for the chat |
+| `/start` | Open the operations console |
+| `/balance` | Settled THB and USDT totals |
+| `/ledger` | Recent ledger entries |
 
-After launching an agent (or sending a follow-up) the bot polls its status every 30 seconds and pushes updates to the chat — including the PR URL when the agent finishes.
+## Input
+
+| Input | Result |
+|---|---|
+| Payment slip image | OCR → confirmation card → settle |
+| `12.5342` or `12.5342 usdt` | USDT amount → confirmation card |
+| `500` or `500 thb` | THB amount → confirmation card |
+
+Buttons on the confirmation card: **Confirm**, **Edit**, **Cancel**.
 
 ## Setup
-
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Create a Cursor API key (Cursor Dashboard → Integrations → API Keys).
-3. Configure and run:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env   # fill in tokens
+cp .env.example .env   # set TELEGRAM_BOT_TOKEN
 set -a && source .env && set +a
 python bot.py
 ```
 
-Set `ALLOWED_USER_IDS` in `.env` to restrict the bot to specific Telegram users — leave it empty and anyone who finds the bot can spend your Cursor credits.
+Set `ALLOWED_USER_IDS` to restrict access. Leave empty to allow anyone with the bot link.
+
+### OCR providers
+
+| Provider | Config | Notes |
+|---|---|---|
+| `mock` (default) | `OCR_PROVIDER=mock` | Deterministic demo OCR from image hash |
+| Google Vision | `OCR_PROVIDER=vision` + `GOOGLE_VISION_API_KEY` | Production OCR |
 
 ## Tests
 
@@ -47,8 +68,27 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-## Files
+## Architecture
 
-- `bot.py` — Telegram bot (python-telegram-bot, long polling) and status-watch job queue
-- `cursor_api.py` — async client for the Cloud Agents API
-- `state.json` — per-chat repo/model settings (created at runtime, git-ignored)
+```
+bot.py              Telegram handlers, callbacks, message editing
+config.py           Environment settings
+db/                 SQLite ledger + receiver history
+services/           OCR, rates, transaction orchestration
+ui/                 Premium card renderers and session state
+cursor_api.py       Legacy Cursor Cloud Agents client (unchanged)
+```
+
+## Design tokens
+
+| Token | Value |
+|---|---|
+| Primary | `#05050A` |
+| Surface | `#101114` |
+| Accent Gold | `#E5C04A` |
+| Accent Cyan | `#00F0FF` |
+| Success | `#00D26A` |
+| Warning | `#FFB800` |
+| Danger | `#FF4D4F` |
+
+Telegram renders structured HTML (`<code>` for monospace numbers, bold status pipeline). Colors are reference tokens for future web surfaces.

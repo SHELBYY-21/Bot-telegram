@@ -1,5 +1,7 @@
 .env
 state.json
+vault.db
+data/
 __pycache__/
 *.pyc
 .venv/
