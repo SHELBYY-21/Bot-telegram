@@ -1,44 +1,85 @@
-# Bot-telegram
+# CE VAULT
 
-Telegram bot for launching and managing [Cursor Cloud Agents](https://cursor.com/docs/cloud-agent/api/endpoints) from chat.
+Premium FinTech Operations Console on Telegram — THB ↔ USDT settlement with OCR, ledger, and automatic rates.
 
-## What it does
+Not a chatbot. One card. One decision. Terminal-grade UX.
 
-Wraps the Cursor Cloud Agents API (`https://api.cursor.com`):
+## Console
 
-| Command | API endpoint |
+| Input | Result |
 |---|---|
-| `/agent <prompt>` | `POST /v0/agents` — launch an agent on the configured repo |
-| `/agents` | `GET /v0/agents` — list recent agents |
-| `/status <id>` | `GET /v0/agents/{id}` |
-| `/conversation <id>` | `GET /v0/agents/{id}/conversation` |
-| `/followup <id> <text>` | `POST /v0/agents/{id}/followup` |
-| `/stop <id>` | `POST /v0/agents/{id}/stop` |
-| `/delete <id>` | `DELETE /v0/agents/{id}` |
-| `/models` | `GET /v0/models` |
-| `/repos` | `GET /v0/repositories` |
-| `/me` | `GET /v0/me` |
-| `/repo <url> [ref]` | set the default repository for the chat |
-| `/model <name>` | set the default model for the chat |
+| Bank slip photo (+ optional caption) | OCR card → Confirmation card |
+| Slip text | OCR card → Confirmation card |
+| USDT amount (`12.5342`) | Confirmation card |
 
-After launching an agent (or sending a follow-up) the bot polls its status every 30 seconds and pushes updates to the chat — including the PR URL when the agent finishes.
+Staff never enters Buy Rate. System calculates USDT, profit, and balance.
+
+### Status rail
+
+```
+● RECEIVED
+● OCR VERIFIED
+● WAITING USDT
+● SETTLED
+```
+
+Only the active step glows.
+
+### Cards
+
+Receive · OCR · Confirmation · Success · History · Error · Edit · Delete
+
+Each message is a single card. Previous console messages are edited in place.
+
+## Commands
+
+| Command | Action |
+|---|---|
+| `/start` | Operations console |
+| `/rates` | Buy / Sell / Profit desk |
+| `/sell <rate>` | Update Sell Rate only |
+| `/balance` | Treasury balance |
+| `/open` | Open (WAITING USDT) entries |
+| `/ledger <id>` | Open a ledger card |
+| `/history <bank> <last4>` | Receiver history |
+| `/delete <id>` | Delete confirmation |
+| `/help` | Compact help |
+
+Buttons on cards: **Confirm · Edit · Cancel**
 
 ## Setup
-
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Create a Cursor API key (Cursor Dashboard → Integrations → API Keys).
-3. Configure and run:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env   # fill in tokens
+cp .env.example .env   # set TELEGRAM_BOT_TOKEN
 set -a && source .env && set +a
 python bot.py
 ```
 
-Set `ALLOWED_USER_IDS` in `.env` to restrict the bot to specific Telegram users — leave it empty and anyone who finds the bot can spend your Cursor credits.
+Optional: set `OPENAI_API_KEY` for Vision OCR on slip images. Without it, caption/text parsing is used.
+
+Set `ALLOWED_USER_IDS` to lock the console to staff Telegram IDs.
+
+## Architecture
+
+```
+bot.py                 entrypoint
+ce_vault/
+  theme.py             typography + money formatting
+  ui/                  cards · status · keyboards
+  ledger/              SQLite secure ledger
+  ocr/                 slip vision + duplicate detection
+  rates/               automatic quote engine
+  handlers/            Telegram console UX
+cursor_api.py          legacy Cursor Agents client (optional)
+agents_bridge.py       optional agent commands when ENABLE_CURSOR_AGENTS=1
+```
+
+### Ledger fields
+
+Ledger ID · Slip · OCR · Receiver · Bank · Last4 · THB · USDT · Buy Rate · Sell Rate · Profit · Staff · Timestamp · History · Images
 
 ## Tests
 
@@ -47,8 +88,6 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-## Files
+## Legacy Cursor Agents
 
-- `bot.py` — Telegram bot (python-telegram-bot, long polling) and status-watch job queue
-- `cursor_api.py` — async client for the Cloud Agents API
-- `state.json` — per-chat repo/model settings (created at runtime, git-ignored)
+The previous Cloud Agents bot remains available behind `ENABLE_CURSOR_AGENTS=true` and `CURSOR_API_KEY`. Agent delete is `/adelete` so it does not clash with CE VAULT `/delete`.

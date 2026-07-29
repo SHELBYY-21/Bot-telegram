@@ -1,0 +1,58 @@
+"""CE VAULT UI package — cards, keyboards, status rails."""
+
+from ce_vault.ui.cards import (
+    ErrorView,
+    HistoryView,
+    OcrResultView,
+    SuccessView,
+    TxDraft,
+    card_confirmation,
+    card_console_home,
+    card_delete,
+    card_edit,
+    card_error,
+    card_history,
+    card_loading,
+    card_ocr,
+    card_receive,
+    card_success,
+    card_transaction,
+    draft_from_record,
+)
+from ce_vault.ui.keyboards import (
+    kb_confirm,
+    kb_delete,
+    kb_done,
+    kb_edit,
+    kb_home,
+    kb_ocr_next,
+)
+from ce_vault.ui.status import PipelineStatus, render_pipeline
+
+__all__ = [
+    "ErrorView",
+    "HistoryView",
+    "OcrResultView",
+    "PipelineStatus",
+    "SuccessView",
+    "TxDraft",
+    "card_confirmation",
+    "card_console_home",
+    "card_delete",
+    "card_edit",
+    "card_error",
+    "card_history",
+    "card_loading",
+    "card_ocr",
+    "card_receive",
+    "card_success",
+    "card_transaction",
+    "draft_from_record",
+    "kb_confirm",
+    "kb_delete",
+    "kb_done",
+    "kb_edit",
+    "kb_home",
+    "kb_ocr_next",
+    "render_pipeline",
+]
