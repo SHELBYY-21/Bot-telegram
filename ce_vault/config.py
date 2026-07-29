@@ -6,17 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-
-# --- Visual tokens (documented for product consistency; Telegram renders via typography) ---
-class Palette:
-    PRIMARY = "#05050A"
-    SURFACE = "#101114"
-    BORDER = "rgba(255,255,255,.06)"
-    GOLD = "#E5C04A"
-    CYAN = "#00F0FF"
-    SUCCESS = "#00D26A"
-    WARNING = "#FFB800"
-    DANGER = "#FF4D4F"
+from ce_vault.theme import Color, OCR_WARN_THRESHOLD  # noqa: F401 — re-export
 
 
 BRAND = "CE VAULT"
@@ -30,26 +20,13 @@ STATUS_PIPELINE = (
 )
 
 
-def _float_env(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    return float(raw)
-
-
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str
     allowed_user_ids: frozenset[int]
-    db_path: Path
     state_file: Path
-    buy_rate: float
-    sell_rate: float
-    openai_api_key: str | None
-    openai_base_url: str
-    openai_vision_model: str
-    ocr_warn_below: float
     images_dir: Path
+    ocr_warn_below: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -64,29 +41,11 @@ class Settings:
             else frozenset()
         )
 
-        db = Path(os.environ.get("LEDGER_DB", "data/ledger.db"))
-        images = Path(os.environ.get("IMAGES_DIR", "data/slips"))
-        state = Path(os.environ.get("STATE_FILE", "state.json"))
-
-        buy = _float_env("BUY_RATE", 39.89)
-        sell = _float_env("SELL_RATE", 40.00)
-        if sell <= 0 or buy <= 0:
-            raise SystemExit("BUY_RATE and SELL_RATE must be positive")
-
+        warn = os.environ.get("OCR_WARN_BELOW", "").strip()
         return cls(
             telegram_token=token,
             allowed_user_ids=allowed,
-            db_path=db,
-            state_file=state,
-            buy_rate=buy,
-            sell_rate=sell,
-            openai_api_key=os.environ.get("OPENAI_API_KEY") or None,
-            openai_base_url=os.environ.get(
-                "OPENAI_BASE_URL", "https://api.openai.com/v1"
-            ).rstrip("/"),
-            openai_vision_model=os.environ.get(
-                "OPENAI_VISION_MODEL", "gpt-4o-mini"
-            ),
-            ocr_warn_below=_float_env("OCR_WARN_BELOW", 90.0),
-            images_dir=images,
+            state_file=Path(os.environ.get("STATE_FILE", "state.json")),
+            images_dir=Path(os.environ.get("IMAGES_DIR", "data/slips")),
+            ocr_warn_below=float(warn) if warn else OCR_WARN_THRESHOLD,
         )

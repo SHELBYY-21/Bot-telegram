@@ -52,6 +52,17 @@ def edit_done_keyboard(ledger_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def settle_keyboard(ledger_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Mark Settled", callback_data=f"settle:{ledger_id}"),
+                InlineKeyboardButton("Cancel", callback_data=f"cancel:{ledger_id}"),
+            ]
+        ]
+    )
+
+
 def done_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("New Entry", callback_data="home")]]

@@ -1,79 +1,52 @@
-"""Rate engine — buy/sell/profit calculated automatically."""
+"""Rate desk — buy/sell USDT rates and automatic profit calculation.
+
+Operators never enter a buy rate during a transaction. The desk
+publishes rates once; every ledger entry pulls the live desk rates
+and derives USDT + profit automatically.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
-
-
-TWOPLACES = Decimal("0.01")
-CRYPTO = Decimal("0.0001")
 
 
 @dataclass(frozen=True)
-class Quote:
-    thb: Decimal
-    usdt: Decimal
-    buy_rate: Decimal
-    sell_rate: Decimal
-    profit_pct: Decimal
-    profit_thb: Decimal
+class RateQuote:
+    buy_rate: float
+    sell_rate: float
 
-    def as_dict(self) -> dict:
-        return {
-            "thb": float(self.thb),
-            "usdt": float(self.usdt),
-            "buy_rate": float(self.buy_rate),
-            "sell_rate": float(self.sell_rate),
-            "profit_pct": float(self.profit_pct),
-            "profit_thb": float(self.profit_thb),
-        }
+    @property
+    def profit_pct(self) -> float:
+        if self.buy_rate <= 0:
+            return 0.0
+        return ((self.sell_rate - self.buy_rate) / self.buy_rate) * 100.0
 
+    def usdt_from_thb(self, thb: float) -> float:
+        if self.sell_rate <= 0:
+            raise ValueError("sell_rate must be positive")
+        return round(thb / self.sell_rate, 4)
 
-def _q(value: float | str | Decimal, places: Decimal) -> Decimal:
-    return Decimal(str(value)).quantize(places, rounding=ROUND_HALF_UP)
+    def thb_from_usdt(self, usdt: float) -> float:
+        return round(usdt * self.sell_rate, 2)
 
 
-class RateEngine:
-    """Sell rate prices customer USDT; buy rate is vault cost basis."""
+def compute_from_thb(thb: float, quote: RateQuote) -> dict[str, float]:
+    usdt = quote.usdt_from_thb(thb)
+    return {
+        "thb": round(float(thb), 2),
+        "usdt": usdt,
+        "buy_rate": quote.buy_rate,
+        "sell_rate": quote.sell_rate,
+        "profit_pct": round(quote.profit_pct, 2),
+    }
 
-    def __init__(self, buy_rate: float, sell_rate: float):
-        self.buy_rate = _q(buy_rate, TWOPLACES)
-        self.sell_rate = _q(sell_rate, TWOPLACES)
-        if self.sell_rate <= 0 or self.buy_rate <= 0:
-            raise ValueError("rates must be positive")
 
-    def update(self, *, buy_rate: float | None = None, sell_rate: float | None = None) -> None:
-        if buy_rate is not None:
-            self.buy_rate = _q(buy_rate, TWOPLACES)
-        if sell_rate is not None:
-            self.sell_rate = _q(sell_rate, TWOPLACES)
-
-    def from_thb(self, thb: float | str | Decimal) -> Quote:
-        amount = _q(thb, TWOPLACES)
-        usdt = (amount / self.sell_rate).quantize(CRYPTO, rounding=ROUND_HALF_UP)
-        return self._quote(amount, usdt)
-
-    def from_usdt(self, usdt: float | str | Decimal) -> Quote:
-        amount_usdt = _q(usdt, CRYPTO)
-        thb = (amount_usdt * self.sell_rate).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
-        return self._quote(thb, amount_usdt)
-
-    def _quote(self, thb: Decimal, usdt: Decimal) -> Quote:
-        # Profit vs vault acquisition cost at buy rate.
-        cost = (usdt * self.buy_rate).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
-        profit_thb = (thb - cost).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
-        if self.buy_rate == 0:
-            profit_pct = Decimal("0")
-        else:
-            profit_pct = (
-                (self.sell_rate - self.buy_rate) / self.buy_rate * Decimal("100")
-            ).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
-        return Quote(
-            thb=thb,
-            usdt=usdt,
-            buy_rate=self.buy_rate,
-            sell_rate=self.sell_rate,
-            profit_pct=profit_pct,
-            profit_thb=profit_thb,
-        )
+def compute_from_usdt(usdt: float, quote: RateQuote) -> dict[str, float]:
+    thb = quote.thb_from_usdt(usdt)
+    return {
+        "thb": thb,
+        "usdt": round(float(usdt), 4),
+        "buy_rate": quote.buy_rate,
+        "sell_rate": quote.sell_rate,
+        "profit_pct": round(quote.profit_pct, 2),
+    }

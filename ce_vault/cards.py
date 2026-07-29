@@ -297,7 +297,7 @@ def progress_card(*, ledger_id: str, status: str, detail: str | None = None) -> 
     return "\n".join(blocks)
 
 
-def console_home(*, buy_rate: float, sell_rate: float, balance: dict[str, float]) -> str:
+def console_home(*, buy_rate: float, sell_rate: float, balance_usdt: float) -> str:
     return "\n".join(
         [
             header(subtitle="Operations Console"),
@@ -305,11 +305,7 @@ def console_home(*, buy_rate: float, sell_rate: float, balance: dict[str, float]
             _gap(),
             value_row("Sell Rate", money(sell_rate, 2)),
             _gap(),
-            value_row("Settled THB", money(balance.get("thb", 0), 2)),
-            _gap(),
-            value_row("Settled USDT", money(balance.get("usdt", 0), 4)),
-            _gap(),
-            value_row("Profit THB", money(balance.get("profit", 0), 2)),
+            value_row("USDT Float", money(balance_usdt, 4)),
             _gap(),
             divider(),
             label("Drop a slip  ·  or send USDT amount"),
@@ -318,9 +314,11 @@ def console_home(*, buy_rate: float, sell_rate: float, balance: dict[str, float]
 
 
 def compact_ledger_line(entry: Any) -> str:
-    lid = getattr(entry, "ledger_id", "?")
-    thb = getattr(entry, "thb", None)
-    status = getattr(entry, "status", "")
-    recv = bank_receiver(getattr(entry, "bank", None), getattr(entry, "last4", None))
+    lid = entry.get("id") if isinstance(entry, dict) else getattr(entry, "ledger_id", "?")
+    thb = entry.get("thb") if isinstance(entry, dict) else getattr(entry, "thb", None)
+    status = entry.get("status") if isinstance(entry, dict) else getattr(entry, "status", "")
+    bank = entry.get("bank") if isinstance(entry, dict) else getattr(entry, "bank", None)
+    last4 = entry.get("last4") if isinstance(entry, dict) else getattr(entry, "last4", None)
+    recv = bank_receiver(bank, last4)
     amt = money(thb or 0, 2) if thb is not None else "—"
     return f"{mono(lid)}  {mono(amt)}  {esc(recv)}  {esc(status)}"
