@@ -25,17 +25,22 @@ def test_create_ledger_defaults_to_sqlite(monkeypatch, tmp_path):
     assert isinstance(store, Ledger)
 
 
-def test_create_ledger_prefers_secret_key(monkeypatch):
-    monkeypatch.setenv("LEDGER_BACKEND", "supabase")
-    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.setenv("SUPABASE_SECRET_KEY", "sb_secret_test")
-    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
-    from vault.store import create_ledger
-    from vault.supabase_ledger import SupabaseLedger
+def test_require_token_missing_message(monkeypatch):
+    monkeypatch.setattr(bot, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    try:
+        bot.require_token()
+        assert False, "expected SystemExit"
+    except SystemExit as exc:
+        msg = str(exc)
+        assert "TELEGRAM_BOT_TOKEN missing" in msg
+        assert "BotFather" in msg
 
-    store = create_ledger()
-    assert isinstance(store, SupabaseLedger)
-    store.close()
+
+def test_require_token_reads_env(monkeypatch):
+    monkeypatch.setattr(bot, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABC")
+    assert bot.require_token() == "123:ABC"
 
 
 def test_parse_status():

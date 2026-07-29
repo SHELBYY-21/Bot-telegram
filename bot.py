@@ -11,7 +11,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path
 
+from dotenv import load_dotenv
 from telegram import Message, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
@@ -834,10 +836,22 @@ def build_app(token: str, ledger_store: LedgerStore | None = None) -> Applicatio
     return application
 
 
-def main() -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+def require_token() -> str:
+    """Load `.env` next to bot.py (no shell `source` needed)."""
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
-        raise SystemExit("TELEGRAM_BOT_TOKEN must be set")
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN missing.\n"
+            "1) cp .env.example .env\n"
+            "2) paste token from https://t.me/BotFather\n"
+            "3) python bot.py   # or ./start.sh"
+        )
+    return token
+
+
+def main() -> None:
+    token = require_token()
     app = build_app(token)
     logger.info("CE VAULT console starting")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
