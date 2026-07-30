@@ -2,7 +2,7 @@
 
 import pytest
 
-from vault.rates import RateQuote, compute_from_thb, compute_from_usdt
+from ce_vault.rates import RateQuote, compute_from_thb, compute_from_usdt
 
 
 def test_profit_and_usdt_from_thb():

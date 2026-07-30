@@ -10,8 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from vault.formatting import ledger_id as make_ledger_id
-from vault.theme import RECEIVER_REPEAT_HOURS, Status
+from ce_vault.formatting import ledger_id as make_ledger_id
+from ce_vault.theme import RECEIVER_REPEAT_HOURS, Status
 
 
 SCHEMA = """

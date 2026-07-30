@@ -17,8 +17,8 @@ from typing import Any
 
 import httpx
 
-from vault.formatting import ledger_id as make_ledger_id
-from vault.theme import RECEIVER_REPEAT_HOURS, Status
+from ce_vault.formatting import ledger_id as make_ledger_id
+from ce_vault.theme import RECEIVER_REPEAT_HOURS, Status
 
 logger = logging.getLogger("ce_vault.supabase")
 

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Protocol
 
-from vault.ledger import Ledger
+from ce_vault.ledger import Ledger
 
 logger = logging.getLogger("ce_vault.store")
 
@@ -59,7 +59,7 @@ def create_ledger() -> LedgerStore:
                 "(or SUPABASE_SERVICE_ROLE_KEY). "
                 "Get keys: https://supabase.com/dashboard/project/cewntchvtnuyxvekivwk/settings/api"
             )
-        from vault.supabase_ledger import SupabaseLedger
+        from ce_vault.supabase_ledger import SupabaseLedger
 
         logger.info("ledger backend: supabase (%s)", url)
         return SupabaseLedger(url, key)

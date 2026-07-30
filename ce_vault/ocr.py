@@ -283,3 +283,38 @@ SCB Easy
 บัญชี: xxx-x-x3376-x
 จำนวนเงิน: 500.00 บาท
 """
+
+
+def parse_usdt_amount(text: str) -> float | None:
+    text = text.strip()
+    m = re.match(
+        r"^(?:USDT|usdt)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:USDT|usdt)?$",
+        text,
+    )
+    if m:
+        return float(m.group(1))
+    m2 = re.match(r"^([0-9]+(?:\.[0-9]+)?)$", text)
+    if m2:
+        return float(m2.group(1))
+    return None
+
+
+def parse_edit_command(text: str) -> dict[str, Any]:
+    """Parse edit corrections: THB 500 | USDT 12.5 | BANK SCB 3376"""
+    out: dict[str, Any] = {}
+    upper = text.strip()
+    m_thb = re.search(r"\bTHB\s*([0-9]+(?:\.[0-9]+)?)", upper, re.IGNORECASE)
+    if m_thb:
+        out["thb"] = float(m_thb.group(1))
+    m_usdt = re.search(r"\bUSDT\s*([0-9]+(?:\.[0-9]+)?)", upper, re.IGNORECASE)
+    if m_usdt:
+        out["usdt"] = float(m_usdt.group(1))
+    m_bank = re.search(
+        r"\bBANK\s+([A-Za-z]+)\s+([0-9]{4})\b",
+        upper,
+        re.IGNORECASE,
+    )
+    if m_bank:
+        out["bank"] = detect_bank(m_bank.group(1)) or m_bank.group(1).upper()
+        out["last4"] = m_bank.group(2)
+    return out

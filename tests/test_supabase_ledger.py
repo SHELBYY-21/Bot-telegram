@@ -7,8 +7,8 @@ import json
 import httpx
 import pytest
 
-from vault.supabase_ledger import STATUS_TO_DB, STATUS_TO_UI, SupabaseLedger
-from vault.theme import Status
+from ce_vault.supabase_ledger import STATUS_TO_DB, STATUS_TO_UI, SupabaseLedger
+from ce_vault.theme import Status
 
 
 def make_store(handler) -> SupabaseLedger:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from vault.ocr import DEMO_SLIP_TEXT, analyze_slip, parse_slip_text, slip_hash
+from ce_vault.ocr import DEMO_SLIP_TEXT, analyze_slip, parse_slip_text, slip_hash
 
 
 def test_parse_demo_slip():

@@ -1,4 +1,4 @@
-"""CE VAULT — Premium FinTech Operations Console."""
+"""CE VAULT — premium FinTech operations console for Telegram."""
 
 __version__ = "2.0.0"
 PRODUCT_NAME = "CE VAULT"

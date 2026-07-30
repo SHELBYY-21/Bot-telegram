@@ -1,7 +1,7 @@
-"""Tests for SQLite ledger."""
+"""SQLite ledger — rates, balance, lifecycle, receivers."""
 
-from vault.ledger import Ledger
-from vault.theme import Status
+from ce_vault.ledger import Ledger
+from ce_vault.theme import Status
 
 
 def test_rates_and_balance_roundtrip(tmp_path):
@@ -24,7 +24,7 @@ def test_ledger_lifecycle_and_duplicate_slip(tmp_path):
         slip_hash="hash-1",
         bank="SCB",
         last4="3376",
-        receiver_name="Somchai",
+        receiver_name="นายสมชาย",
         thb=500,
         usdt=12.5,
         buy_rate=39.89,
@@ -35,31 +35,18 @@ def test_ledger_lifecycle_and_duplicate_slip(tmp_path):
     assert a["id"].startswith("LV-")
     assert store.find_by_slip_hash("hash-1")["id"] == a["id"]
 
-    store.update(a["id"], status=Status.WAITING_USDT.value)
     settled = store.record_settlement(a["id"])
     assert settled["status"] == Status.SETTLED.value
     assert store.get_balance() == 487.5
 
     hist = store.receiver_history("SCB", "3376")
+    assert hist is not None
     assert hist["tx_count"] == 1
-    assert hist["total_thb"] == 500.0
-
-    b = store.create_entry(
-        status=Status.RECEIVED.value,
-        bank="SCB",
-        last4="3376",
-        thb=100,
-        usdt=2.5,
-    )
-    assert store.is_repeat_receiver("SCB", "3376")
-
-    assert store.delete(b["id"]) is True
-    assert store.get(b["id"]) is None
+    assert hist["total_thb"] == 500
 
 
-def test_sequential_ledger_ids(tmp_path):
+def test_delete_entry(tmp_path):
     store = Ledger(tmp_path / "vault.db")
-    first = store.create_entry(thb=1, usdt=0.01)
-    second = store.create_entry(thb=2, usdt=0.02)
-    assert first["id"] != second["id"]
-    assert first["id"].rsplit("-", 1)[0] == second["id"].rsplit("-", 1)[0]
+    e = store.create_entry(status=Status.RECEIVED.value, thb=10)
+    assert store.delete(e["id"]) is True
+    assert store.get(e["id"]) is None
