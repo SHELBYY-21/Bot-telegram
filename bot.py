@@ -14,6 +14,8 @@ Commands:
   /stop <id>            — stop a running agent
   /delete <id>          — delete an agent
   /me                   — show Cursor API key info
+  /carta <investment> <cap> <discount%> <price> <shares>
+                         — SAFE-to-equity conversion calculator
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from carta import convert_safe
 from cursor_api import CursorAPIError, CursorClient
 
 logging.basicConfig(
@@ -175,7 +178,8 @@ HELP = (
     "/followup &lt;id&gt; &lt;text&gt; — send follow-up\n"
     "/stop &lt;id&gt; — stop agent\n"
     "/delete &lt;id&gt; — delete agent\n"
-    "/me — API key info"
+    "/me — API key info\n"
+    "/carta &lt;investment&gt; &lt;cap&gt; &lt;discount%&gt; &lt;price&gt; &lt;shares&gt; — SAFE conversion calculator"
 )
 
 
