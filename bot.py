@@ -400,6 +400,41 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply(update, f"<pre>{html.escape(json.dumps(info, indent=2))}</pre>")
 
 
+async def cmd_carta(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update):
+        return
+    if not context.args or len(context.args) < 5:
+        await reply(
+            update,
+            "Usage: /carta &lt;investment&gt; &lt;cap&gt; &lt;discount%&gt; &lt;price&gt; &lt;shares&gt;\n\n"
+            "Example: /carta 500000 5000000 20 2.00 1000000",
+        )
+        return
+    try:
+        investment = float(context.args[0])
+        valuation_cap = float(context.args[1])
+        discount_percent = float(context.args[2])
+        round_price_per_share = float(context.args[3])
+        pre_round_shares = float(context.args[4])
+    except ValueError as e:
+        await reply(update, f"Invalid input: {html.escape(str(e))}")
+        return
+    try:
+        result = convert_safe(investment, valuation_cap, discount_percent, round_price_per_share, pre_round_shares)
+    except ValueError as e:
+        await reply(update, f"Conversion error: {html.escape(str(e))}")
+        return
+    lines = [
+        "<b>SAFE Conversion Result</b>",
+        f"Investment: ${investment:,.2f}",
+        f"Conversion price: ${result.conversion_price:,.4f}",
+        f"Shares issued: {result.shares_issued:,.2f}",
+        f"Ownership: {result.ownership_pct:.4f}%",
+        f"Basis: {result.basis}",
+    ]
+    await reply(update, "\n".join(lines))
+
+
 # --- app lifecycle -------------------------------------------------------
 
 async def on_shutdown(application: Application) -> None:
@@ -432,6 +467,7 @@ def main() -> None:
         "stop": cmd_stop,
         "delete": cmd_delete,
         "me": cmd_me,
+        "carta": cmd_carta,
     }
     for name, fn in handlers.items():
         application.add_handler(CommandHandler(name, fn))
