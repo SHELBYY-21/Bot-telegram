@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS ledger (
     status TEXT NOT NULL,
     slip_file_id TEXT,
     slip_hash TEXT,
+    slip_url TEXT,
     ocr_json TEXT,
     ocr_confidence REAL,
     receiver_name TEXT,
@@ -148,9 +149,22 @@ class Ledger:
             finally:
                 conn.close()
 
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Additive column migrations for databases created by an older build.
+
+        CREATE TABLE IF NOT EXISTS leaves an existing table untouched, so a
+        column added to SCHEMA never reaches a vault.db that already exists.
+        Each entry here is idempotent — checked against PRAGMA table_info.
+        """
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(ledger)")}
+        for column, ddl in (("slip_url", "ALTER TABLE ledger ADD COLUMN slip_url TEXT"),):
+            if column not in existing:
+                conn.execute(ddl)
+
     def _init_db(self) -> None:
         with self._db() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
             row = conn.execute("SELECT buy_rate FROM rates WHERE id = 1").fetchone()
             if row is None:
                 conn.execute(
@@ -237,6 +251,7 @@ class Ledger:
             "status": fields.get("status", Status.RECEIVED.value),
             "slip_file_id": fields.get("slip_file_id"),
             "slip_hash": fields.get("slip_hash"),
+            "slip_url": fields.get("slip_url"),
             "ocr_json": json.dumps(fields["ocr"]) if fields.get("ocr") is not None else fields.get("ocr_json"),
             "ocr_confidence": fields.get("ocr_confidence"),
             "receiver_name": fields.get("receiver_name"),

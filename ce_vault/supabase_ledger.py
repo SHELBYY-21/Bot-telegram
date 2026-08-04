@@ -96,6 +96,7 @@ class SupabaseLedger:
             "status": STATUS_TO_UI.get(status_db, Status.RECEIVED.value),
             "status_db": status_db,
             "slip_file_id": row.get("slip_image_url"),
+            "slip_url": row.get("slip_image_url"),
             "slip_hash": row.get("slip_hash"),
             "ocr_confidence": _num(row.get("ocr_confidence")),
             "receiver_name": row.get("receiver_name"),
@@ -256,7 +257,10 @@ class SupabaseLedger:
             "sell_value_thb": thb,
             "net_profit_thb": round(float(thb) * float(profit) / 100.0, 2) if profit else 0,
             "profit_percent": profit,
-            "slip_image_url": fields.get("slip_file_id"),
+            # Prefer the durable Storage URL; the Telegram file_id is only a
+            # handle into Telegram's cache and cannot be fetched by anything
+            # other than this bot.
+            "slip_image_url": fields.get("slip_url") or fields.get("slip_file_id"),
             "slip_hash": fields.get("slip_hash"),
             "ocr_confidence": fields.get("ocr_confidence"),
             "receiver_name": fields.get("receiver_name"),
@@ -316,8 +320,8 @@ class SupabaseLedger:
             patch["receiver_bank"] = fields["bank"]
         if "last4" in fields:
             patch["receiver_last4"] = fields["last4"]
-        if "slip_file_id" in fields:
-            patch["slip_image_url"] = fields["slip_file_id"]
+        if "slip_url" in fields or "slip_file_id" in fields:
+            patch["slip_image_url"] = fields.get("slip_url") or fields.get("slip_file_id")
         if "slip_hash" in fields:
             patch["slip_hash"] = fields["slip_hash"]
         if "ocr_confidence" in fields:

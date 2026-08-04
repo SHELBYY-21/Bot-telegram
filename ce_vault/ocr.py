@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger("ce_vault.ocr")
 
 BANK_ALIASES = {
     "SCB": ("SCB", "SIAM COMMERCIAL", "ไทยพาณิชย์", "SCB Easy"),
@@ -212,14 +215,58 @@ def parse_slip_text(text: str) -> OCRResult:
     )
 
 
-async def vision_ocr(image_bytes: bytes, api_key: str | None = None) -> OCRResult | None:
-    """Optional OpenAI-compatible vision pass for slip images."""
-    key = api_key or os.environ.get("OCR_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if not key:
+GROK_API_BASE = "https://api.x.ai/v1"
+GROK_VISION_MODEL = "grok-2-vision-1212"
+OPENAI_API_BASE = "https://api.openai.com/v1"
+OPENAI_VISION_MODEL = "gpt-4o-mini"
+
+# Log the resolved provider once rather than on every slip.
+_logged_providers: set[str] = set()
+
+
+def resolve_vision_provider(api_key: str | None = None) -> tuple[str, str, str] | None:
+    """Resolve ``(key, base_url, model)`` for the vision OCR call, or None.
+
+    Grok is preferred when ``GROK_API_KEY`` is present — it reads Thai bank
+    slips noticeably better than the general-purpose models. Both providers
+    speak the same OpenAI-style ``/chat/completions`` schema, so only the
+    host and model name differ.
+
+    ``OCR_API_KEY`` (or an explicit argument) takes precedence, and
+    ``OCR_API_BASE`` / ``OCR_MODEL`` always override the chosen defaults, so
+    any other OpenAI-compatible endpoint stays reachable.
+    """
+    explicit = (api_key or os.environ.get("OCR_API_KEY") or "").strip()
+    grok = (os.environ.get("GROK_API_KEY") or "").strip()
+    openai_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+
+    if explicit:
+        key, base, model = explicit, OPENAI_API_BASE, OPENAI_VISION_MODEL
+    elif grok:
+        key = grok
+        base = GROK_API_BASE
+        model = (os.environ.get("GROK_MODEL") or "").strip() or GROK_VISION_MODEL
+    elif openai_key:
+        key, base, model = openai_key, OPENAI_API_BASE, OPENAI_VISION_MODEL
+    else:
         return None
 
-    base = os.environ.get("OCR_API_BASE", "https://api.openai.com/v1")
-    model = os.environ.get("OCR_MODEL", "gpt-4o-mini")
+    base = ((os.environ.get("OCR_API_BASE") or "").strip() or base).rstrip("/")
+    model = (os.environ.get("OCR_MODEL") or "").strip() or model
+
+    fingerprint = f"{base}|{model}"
+    if fingerprint not in _logged_providers:
+        _logged_providers.add(fingerprint)
+        logger.info("vision OCR provider: %s (%s)", base, model)
+    return key, base, model
+
+
+async def vision_ocr(image_bytes: bytes, api_key: str | None = None) -> OCRResult | None:
+    """Optional OpenAI-compatible vision pass for slip images."""
+    provider = resolve_vision_provider(api_key)
+    if not provider:
+        return None
+    key, base, model = provider
     import base64
 
     b64 = base64.b64encode(image_bytes).decode("ascii")

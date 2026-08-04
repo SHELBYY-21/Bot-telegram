@@ -54,6 +54,7 @@ from ce_vault.handlers import (
     on_text,
 )
 from ce_vault.session import SessionStore
+from ce_vault.storage import create_slip_storage
 from ce_vault.store import create_ledger
 
 logging.basicConfig(
@@ -63,10 +64,10 @@ logger = logging.getLogger("ce_vault")
 
 
 async def on_shutdown(application: Application) -> None:
-    store = application.bot_data.get("ledger")
-    close = getattr(store, "close", None)
-    if callable(close):
-        close()
+    for key in ("ledger", "slip_storage"):
+        close = getattr(application.bot_data.get(key), "close", None)
+        if callable(close):
+            close()
 
 
 def build_app(settings: Settings | None = None, ledger_store=None) -> Application:
@@ -82,6 +83,7 @@ def build_app(settings: Settings | None = None, ledger_store=None) -> Applicatio
     store = ledger_store or create_ledger()
     application.bot_data["settings"] = settings
     application.bot_data["ledger"] = store
+    application.bot_data["slip_storage"] = create_slip_storage()
     application.bot_data["sessions"] = SessionStore(settings.state_file)
 
     application.add_handler(CommandHandler(["start", "console"], cmd_start))
