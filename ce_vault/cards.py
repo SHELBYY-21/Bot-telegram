@@ -313,6 +313,48 @@ def console_home(*, buy_rate: float, sell_rate: float, balance_usdt: float) -> s
     )
 
 
+def today_card(
+    *,
+    summary: dict,
+    by_staff: list[dict] | None = None,
+    balance_usdt: float | None = None,
+    sell_rate: float | None = None,
+) -> str:
+    """Mini dashboard: today's counts, sums, profit, pending, wallet."""
+    blocks = [
+        header(subtitle="Today"),
+        value_row("Trades", mono(str(summary.get("tx_count", 0)))),
+        _gap(),
+        value_row("THB In", money(float(summary.get("thb") or 0), 2)),
+        _gap(),
+        value_row("USDT Out", money(float(summary.get("usdt") or 0), 4)),
+        _gap(),
+        value_row("Profit", money(float(summary.get("profit_thb") or 0), 2)),
+        _gap(),
+        value_row(
+            "Pending",
+            mono(f"{summary.get('pending', 0)} / {summary.get('tx_count', 0)}"),
+        ),
+    ]
+    if balance_usdt is not None:
+        blocks.append(_gap())
+        blocks.append(value_row("USDT Float", money(float(balance_usdt), 4)))
+    if sell_rate is not None:
+        blocks.append(_gap())
+        blocks.append(value_row("Sell Rate", money(float(sell_rate), 2)))
+    if by_staff:
+        blocks.append(_gap())
+        blocks.append(divider())
+        blocks.append(label("By Staff"))
+        blocks.append(_gap())
+        for row in by_staff:
+            name = esc(str(row.get("staff_name") or "—"))
+            count = mono(str(row.get("tx_count", 0)))
+            thb = money(float(row.get("thb") or 0), 0)
+            blocks.append(f"{name}  ·  {count}  ·  {thb}")
+    return "\n".join(blocks)
+
+
 def compact_ledger_line(entry: Any) -> str:
     lid = entry.get("id") if isinstance(entry, dict) else getattr(entry, "ledger_id", "?")
     thb = entry.get("thb") if isinstance(entry, dict) else getattr(entry, "thb", None)

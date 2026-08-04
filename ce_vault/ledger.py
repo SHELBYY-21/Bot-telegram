@@ -85,6 +85,34 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _day_bounds_utc(now: datetime | None = None) -> tuple[str, str]:
+    """UTC ISO bounds for "today" in the desk timezone.
+
+    Reads TIMEZONE env (default Asia/Bangkok); computes local midnight-to-
+    midnight, then converts to UTC for comparison against stored created_at
+    values (which are stored as UTC ISO strings by _utcnow()).
+    """
+    import os
+
+    tz_name = os.environ.get("TIMEZONE", "Asia/Bangkok")
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    now = now or datetime.now(tz)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=tz)
+    local = now.astimezone(tz)
+    start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(timezone.utc).isoformat(),
+        end_local.astimezone(timezone.utc).isoformat(),
+    )
+
+
 def receiver_key(bank: str | None, last4: str | None) -> str | None:
     if not bank or not last4:
         return None
@@ -290,6 +318,86 @@ class Ledger:
                 (slip_hash, Status.CANCELLED.value),
             ).fetchone()
             return dict(row) if row else None
+
+    # --- dashboard -------------------------------------------------------
+
+    def today_summary(self) -> dict:
+        """One-shot mini dashboard for today's activity.
+
+        Excludes CANCELLED entries from totals but keeps them in `cancelled`.
+        Profit is derived from stored profit_pct × THB (the ledger doesn't
+        store profit_thb as its own column on SQLite, so the derivation
+        happens here — see ce_vault.rates.compute_from_thb_and_usdt).
+        """
+        start, end = _day_bounds_utc()
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT status, thb, usdt, profit_pct
+                FROM ledger
+                WHERE created_at >= ? AND created_at < ?
+                """,
+                (start, end),
+            ).fetchall()
+        counts = {
+            "tx_count": 0,
+            "cancelled": 0,
+            "pending": 0,
+            "settled": 0,
+            "thb": 0.0,
+            "usdt": 0.0,
+            "profit_thb": 0.0,
+        }
+        for row in rows:
+            status = row["status"] or ""
+            if status == Status.CANCELLED.value:
+                counts["cancelled"] += 1
+                continue
+            counts["tx_count"] += 1
+            thb = float(row["thb"] or 0)
+            usdt = float(row["usdt"] or 0)
+            counts["thb"] += thb
+            counts["usdt"] += usdt
+            if status == Status.SETTLED.value:
+                counts["settled"] += 1
+            else:
+                counts["pending"] += 1
+            profit_pct = float(row["profit_pct"] or 0)
+            counts["profit_thb"] += round(thb * profit_pct / 100.0, 2)
+        counts["thb"] = round(counts["thb"], 2)
+        counts["usdt"] = round(counts["usdt"], 4)
+        counts["profit_thb"] = round(counts["profit_thb"], 2)
+        return counts
+
+    def today_by_staff(self) -> list[dict]:
+        """Per-staff totals for today, sorted by tx_count desc."""
+        start, end = _day_bounds_utc()
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT staff_id, staff_name,
+                       COUNT(*) AS tx_count,
+                       COALESCE(SUM(thb), 0) AS thb,
+                       COALESCE(SUM(usdt), 0) AS usdt,
+                       COALESCE(SUM(thb * profit_pct / 100.0), 0) AS profit_thb
+                FROM ledger
+                WHERE created_at >= ? AND created_at < ? AND status != ?
+                GROUP BY staff_id, staff_name
+                ORDER BY tx_count DESC
+                """,
+                (start, end, Status.CANCELLED.value),
+            ).fetchall()
+        return [
+            {
+                "staff_id": row["staff_id"],
+                "staff_name": row["staff_name"] or "—",
+                "tx_count": row["tx_count"],
+                "thb": round(float(row["thb"] or 0), 2),
+                "usdt": round(float(row["usdt"] or 0), 4),
+                "profit_thb": round(float(row["profit_thb"] or 0), 2),
+            }
+            for row in rows
+        ]
 
     # --- receivers -------------------------------------------------------
 
