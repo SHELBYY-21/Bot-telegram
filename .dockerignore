@@ -1,2 +1,24 @@
-fly.toml
+.git
+.gitignore
 .venv
+.env
+fly.toml
+Dockerfile
+.dockerignore
+
+# Local state — never bake into the image; /data is a volume at runtime.
+data/
+state.json
+*.db
+*.db-wal
+*.db-shm
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+tests/
+requirements-dev.txt
+pytest.ini
+README.md
+*.md

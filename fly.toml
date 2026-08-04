@@ -1,27 +1,42 @@
-# fly.toml app configuration file generated for bot-telegram-srjmuw on 2026-08-04T08:00:03Z
+# fly.toml — CE VAULT Telegram worker
 #
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+# See https://fly.io/docs/reference/configuration/
 #
+# This app deliberately declares NO [http_service] / [[services]] block.
+# CE VAULT talks to Telegram over an *outbound* long-poll connection and
+# never receives inbound HTTP. Attaching an http_service (as `fly launch`
+# does by default) combined with auto_stop_machines would suspend the
+# machine as soon as it saw no web traffic — which is always — and only
+# auto_start it on an inbound request that never arrives. The bot would go
+# silent minutes after every deploy.
+#
+# Consequence of having no service: the machine runs continuously. That is
+# the intended behavior for a poller.
 
-app = 'bot-telegram-srjmuw'
-primary_region = 'sin'
+app = 'bot-telegram-imme8g'
+primary_region = 'sin'  # Singapore — lowest RTT to Telegram + Supabase for a Thailand desk
 
 [build]
-  builder = 'paketobuildpacks/builder:base'
+  # Uses the Dockerfile in the repo root. The generated Paketo buildpack
+  # config was removed: it looked for a `web:` Procfile process and there
+  # is no web server to start.
 
 [env]
-  PORT = '8080'
+  TIMEZONE = 'Asia/Bangkok'
+  LEDGER_BACKEND = 'auto'
+  STATE_FILE = '/data/state.json'
+  LEDGER_DB = '/data/vault.db'
+  IMAGES_DIR = '/data/slips'
 
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
-  auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
+# Durable storage for per-chat session state (and the SQLite ledger when
+# Supabase is not configured). A volume also pins the app to one machine,
+# which is required here: two machines would both long-poll and each
+# Telegram update would be processed twice.
+[mounts]
+  source = 'ce_vault_data'
+  destination = '/data'
 
 [[vm]]
-  memory = '1gb'
+  memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 1024

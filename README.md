@@ -91,3 +91,32 @@ ce_vault/
 pip install -r requirements-dev.txt
 pytest -q
 ```
+
+## Deploy (Fly.io)
+
+CE VAULT is a **worker**, not a web app — it long-polls Telegram and never
+receives inbound HTTP. `fly.toml` therefore declares no `[http_service]`, so
+the machine runs continuously instead of being auto-stopped for idleness.
+
+```bash
+fly volumes create ce_vault_data --region sin --size 1   # once
+fly secrets set \
+  TELEGRAM_BOT_TOKEN='…' \
+  SUPABASE_URL='https://<project>.supabase.co' \
+  SUPABASE_SECRET_KEY='…' \
+  ALLOWED_USER_IDS='11111111 22222222' \
+  OCR_API_KEY='…'
+fly deploy
+fly logs
+```
+
+Non-secret settings (`TIMEZONE`, `LEDGER_BACKEND`, paths) live in `fly.toml`
+under `[env]`. Everything above goes through `fly secrets` so it is never
+committed and never appears in build logs.
+
+**Run exactly one machine.** Two instances would both long-poll and process
+every Telegram update twice — double ledger rows. The `[mounts]` volume pins
+the app to a single machine; verify with `fly scale count 1`.
+
+Persistent state on the volume at `/data`: `state.json` (in-flight per-chat
+sessions), `vault.db` (SQLite ledger when Supabase is unset), `slips/`.
