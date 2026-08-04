@@ -155,4 +155,6 @@ every Telegram update twice — double ledger rows. The `[mounts]` volume pins
 the app to a single machine; verify with `fly scale count 1`.
 
 Persistent state on the volume at `/data`: `state.json` (in-flight per-chat
-sessions), `vault.db` (SQLite ledger when Supabase is unset), `slips/`.
+sessions), `vault.db` (SQLite ledger when Supabase is unset), and `slips/`
+(only when slip storage falls back to local — with Supabase configured the
+images go to the bucket instead and the volume just holds session state).
