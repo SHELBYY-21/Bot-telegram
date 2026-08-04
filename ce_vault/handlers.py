@@ -40,6 +40,10 @@ def _settings(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data["settings"]
 
 
+def _slip_storage(context: ContextTypes.DEFAULT_TYPE):
+    return context.application.bot_data["slip_storage"]
+
+
 def _quote(context: ContextTypes.DEFAULT_TYPE) -> RateQuote:
     buy, sell = _ledger(context).get_rates()
     return RateQuote(buy_rate=buy, sell_rate=sell)
@@ -424,8 +428,11 @@ async def begin_from_ocr(
     if hist:
         repeat_count = int(hist.get("tx_count") or 0)
 
+    # Persist the slip itself — it is the evidence behind the ledger row.
+    # Best-effort: a storage outage must not stop the desk from booking.
+    slip_url = None
     if image_bytes:
-        settings.images_dir.mkdir(parents=True, exist_ok=True)
+        slip_url = _slip_storage(context).save(image_bytes, digest)
 
     q = _quote(context)
     # OCR captures THB only; USDT actually received is entered by the operator
@@ -440,6 +447,7 @@ async def begin_from_ocr(
     entry = store.create_entry(
         status=status,
         slip_file_id=file_id,
+        slip_url=slip_url,
         slip_hash=digest,
         ocr=result.to_dict(),
         ocr_confidence=result.confidence,
