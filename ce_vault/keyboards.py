@@ -67,3 +67,9 @@ def done_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("New Entry", callback_data="home")]]
     )
+
+
+def cancel_only_keyboard(ledger_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Cancel", callback_data=f"cancel:{ledger_id}")]]
+    )

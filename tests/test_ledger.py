@@ -32,7 +32,7 @@ def test_ledger_lifecycle_and_duplicate_slip(tmp_path):
         profit_pct=0.28,
         staff_id=1,
     )
-    assert a["id"].startswith("LV-")
+    assert a["id"].startswith("CE-")
     assert store.find_by_slip_hash("hash-1")["id"] == a["id"]
 
     settled = store.record_settlement(a["id"])

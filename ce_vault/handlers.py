@@ -16,7 +16,12 @@ from ce_vault.ocr import (
     parse_edit_command,
     parse_usdt_amount,
 )
-from ce_vault.rates import RateQuote, compute_from_thb, compute_from_usdt
+from ce_vault.rates import (
+    RateQuote,
+    compute_from_thb,
+    compute_from_thb_and_usdt,
+    compute_from_usdt,
+)
 from ce_vault.store import LedgerStore
 from ce_vault.theme import Status
 
@@ -142,6 +147,36 @@ async def cmd_setrates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     staff = update.effective_user
     _ledger(context).set_rates(buy, sell, updated_by=staff.id if staff else None)
     await show_home(update, context)
+
+
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mini dashboard for today: counts, sums, profit, pending, wallet."""
+    if not authorized(update, context):
+        return
+    store = _ledger(context)
+    summary = store.today_summary()
+    by_staff = store.today_by_staff()
+    q = _quote(context)
+    text = cards.today_card(
+        summary=summary,
+        by_staff=by_staff,
+        balance_usdt=store.get_balance(),
+        sell_rate=q.sell_rate,
+    )
+    await render(update, context, text)
+
+
+async def cmd_staff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Today's per-person totals."""
+    if not authorized(update, context):
+        return
+    store = _ledger(context)
+    by_staff = store.today_by_staff()
+    text = cards.today_card(
+        summary=store.today_summary(),
+        by_staff=by_staff or [{"staff_name": "—", "tx_count": 0, "thb": 0.0}],
+    )
+    await render(update, context, text)
 
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -369,6 +404,20 @@ async def begin_from_ocr(
 
     store = _ledger(context)
     duplicate = store.find_by_slip_hash(digest)
+    # A duplicate slip is not something to record a second time — surface the
+    # previous ledger reference and stop. Design principle: one card, one
+    # decision; the decision here is "resubmit or contact Admin".
+    if duplicate:
+        await render(
+            update,
+            context,
+            cards.duplicate_slip_card(
+                previous_time=duplicate.get("created_at"),
+                previous_ledger_id=duplicate.get("id"),
+            ),
+        )
+        return
+
     repeat = store.is_repeat_receiver(result.bank, result.last4)
     repeat_count = 0
     hist = store.receiver_history(result.bank, result.last4)
@@ -379,18 +428,10 @@ async def begin_from_ocr(
         settings.images_dir.mkdir(parents=True, exist_ok=True)
 
     q = _quote(context)
-    amounts = (
-        compute_from_thb(result.amount_thb, q)
-        if result.amount_thb
-        else {
-            "thb": None,
-            "usdt": None,
-            "buy_rate": q.buy_rate,
-            "sell_rate": q.sell_rate,
-            "profit_pct": round(q.profit_pct, 2),
-        }
-    )
-
+    # OCR captures THB only; USDT actually received is entered by the operator
+    # after they eyeball the on-chain send. sell_rate is snapshotted here so
+    # the settlement profit is measured against the rate at ingest time, not
+    # whatever the desk rate happens to be when the operator confirms.
     status = (
         Status.OCR_VERIFIED.value
         if result.amount_thb and not warn
@@ -405,11 +446,11 @@ async def begin_from_ocr(
         receiver_name=result.receiver_name,
         bank=result.bank,
         last4=result.last4,
-        thb=amounts.get("thb"),
-        usdt=amounts.get("usdt"),
-        buy_rate=amounts.get("buy_rate"),
-        sell_rate=amounts.get("sell_rate"),
-        profit_pct=amounts.get("profit_pct"),
+        thb=round(float(result.amount_thb), 2) if result.amount_thb else None,
+        usdt=None,
+        buy_rate=None,
+        sell_rate=q.sell_rate,
+        profit_pct=None,
         staff_id=user.id,
         staff_name=user.full_name,
         chat_id=update.effective_chat.id,
@@ -430,6 +471,7 @@ async def begin_from_ocr(
             bank=result.bank,
             last4=result.last4,
             amount=result.amount_thb,
+            slip_datetime=result.slip_datetime,
             verified=bool(result.amount_thb and result.bank and result.last4 and not warn),
             warn=warn,
             duplicate=bool(duplicate),
@@ -499,6 +541,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if sess.mode == "edit" and sess.active_ledger_id:
         await _apply_edit(update, context, sess.active_ledger_id, text)
+        return
+
+    # Operator answering the "how much USDT did you actually send?" prompt.
+    if sess.mode == "await_usdt" and sess.active_ledger_id:
+        usdt = parse_usdt_amount(text)
+        if usdt is None:
+            await render(
+                update,
+                context,
+                cards.error_card(
+                    problem="Bad amount",
+                    cause="Expected a number for USDT sent.",
+                    action="Send e.g. 12.5   or   USDT 12.5",
+                ),
+            )
+            return
+        await apply_usdt_received(update, context, sess.active_ledger_id, usdt)
         return
 
     if any(
@@ -603,6 +662,11 @@ async def _show_confirmation(
         if status == Status.WAITING_USDT.value
         else keyboards.confirm_keyboard(entry["id"])
     )
+    # Receiver dossier — shows "History: N Transactions" on the card
+    hist_count = None
+    hist = _ledger(context).receiver_history(entry.get("bank"), entry.get("last4"))
+    if hist and hist.get("tx_count"):
+        hist_count = int(hist["tx_count"])
     await render(
         update,
         context,
@@ -619,9 +683,81 @@ async def _show_confirmation(
             status=status
             if status != Status.RECEIVED.value
             else Status.OCR_VERIFIED.value,
+            history_count=hist_count,
         ),
         keyboard=keyboard,
     )
+
+
+async def _prompt_for_usdt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, entry: dict
+) -> None:
+    """After OCR verifies THB, ask the operator for the USDT they actually sent."""
+    q = _quote(context)
+    await render(
+        update,
+        context,
+        cards.receive_card(
+            ledger_id=entry["id"],
+            thb=entry.get("thb"),
+            usdt=None,
+            buy_rate=None,
+            sell_rate=entry.get("sell_rate") or q.sell_rate,
+            bank=entry.get("bank"),
+            last4=entry.get("last4"),
+            status=Status.OCR_VERIFIED.value,
+            hint="Send USDT amount actually sent",
+        ),
+        keyboard=keyboards.cancel_only_keyboard(entry["id"]),
+    )
+
+
+async def apply_usdt_received(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    ledger_id: str,
+    usdt: float,
+) -> None:
+    """Operator entered the actual USDT sent — compute buy_rate + profit."""
+    store = _ledger(context)
+    entry = store.get(ledger_id)
+    if not entry or entry.get("thb") is None:
+        await render(
+            update,
+            context,
+            cards.error_card(
+                problem="Missing THB",
+                cause="Ledger entry has no THB inbound to price against.",
+                action="Start over with a slip.",
+            ),
+        )
+        return
+    sell_rate = float(entry.get("sell_rate") or _quote(context).sell_rate)
+    try:
+        amounts = compute_from_thb_and_usdt(float(entry["thb"]), usdt, sell_rate)
+    except ValueError as exc:
+        await render(
+            update,
+            context,
+            cards.error_card(
+                problem="Bad amount",
+                cause=str(exc),
+                action="Send a positive USDT amount.",
+            ),
+        )
+        return
+    entry = store.update(
+        ledger_id,
+        status=Status.WAITING_USDT.value,
+        thb=amounts["thb"],
+        usdt=amounts["usdt"],
+        buy_rate=amounts["buy_rate"],
+        sell_rate=amounts["sell_rate"],
+        profit_pct=amounts["profit_pct"],
+    )
+    _sessions(context).update(update.effective_chat.id, mode="idle")
+    assert entry
+    await _show_confirmation(update, context, entry)
 
 
 async def _show_entry_card(
@@ -672,8 +808,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     entry = store.get(ledger_id)
 
     if action == "ocr_ok":
-        await answer_callback(update, "Quoted")
         if not entry:
+            await answer_callback(update, "Expired")
             await render(
                 update,
                 context,
@@ -685,10 +821,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
         q = _quote(context)
-        fields: dict = {"status": Status.OCR_VERIFIED.value}
+        # Prefer the actuals-mode prompt: OCR gave us THB, next step is the
+        # operator entering the USDT they actually sent.
         if entry.get("thb") is not None and entry.get("usdt") is None:
-            fields.update(compute_from_thb(float(entry["thb"]), q))
-        elif entry.get("thb") is None and entry.get("usdt") is not None:
+            await answer_callback(update, "Enter USDT")
+            _sessions(context).update(
+                update.effective_chat.id,
+                active_ledger_id=ledger_id,
+                mode="await_usdt",
+            )
+            entry = store.update(ledger_id, status=Status.OCR_VERIFIED.value)
+            await _prompt_for_usdt(update, context, entry)
+            return
+        # Fallback: legacy USDT-only quote entered up front.
+        await answer_callback(update, "Quoted")
+        fields: dict = {"status": Status.OCR_VERIFIED.value}
+        if entry.get("thb") is None and entry.get("usdt") is not None:
             fields.update(compute_from_usdt(float(entry["usdt"]), q))
         entry = store.update(ledger_id, **fields)
         assert entry
@@ -753,13 +901,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _sessions(context).update(
             update.effective_chat.id, active_ledger_id=None, mode="idle"
         )
+        thb_v = float(settled.get("thb") or 0)
+        usdt_v = float(settled.get("usdt") or 0)
+        buy_v = float(settled.get("buy_rate") or 0)
+        sell_v = float(settled.get("sell_rate") or 0)
+        profit_thb = round(usdt_v * (sell_v - buy_v), 2) if usdt_v and sell_v and buy_v else None
         await render(
             update,
             context,
             cards.success_card(
                 ledger_id=settled["id"],
                 profit_pct=settled.get("profit_pct"),
-                profit_thb=None,
+                profit_thb=profit_thb,
+                thb=thb_v or None,
+                usdt=usdt_v or None,
+                buy_rate=buy_v or None,
+                sell_rate=sell_v or None,
                 balance_usdt=bal,
             ),
             keyboard=keyboards.done_keyboard(),

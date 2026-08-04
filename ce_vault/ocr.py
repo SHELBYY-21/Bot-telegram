@@ -48,6 +48,59 @@ NAME_PATTERNS = [
     re.compile(r"(นาย|นาง|นางสาว|น\.ส\.|Mr\.?|Mrs\.?|Ms\.?)\s*.+"),
 ]
 
+# Thai bank slips label the transfer time in a variety of ways.
+# Capture date (dd/mm/yy or dd/mm/yyyy or dd-mm-yyyy) optionally followed by
+# a HH:MM[:SS] time. The date can appear with any of these prefixes or bare.
+DATETIME_PATTERNS = [
+    re.compile(
+        r"(?:วันที่|Date|On)\s*[:：]?\s*"
+        r"(?P<date>\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4})"
+        r"(?:[\s,]+(?:เวลา|Time|at)?\s*[:：]?\s*(?P<time>\d{1,2}:\d{2}(?::\d{2})?))?",
+        re.I,
+    ),
+    re.compile(
+        r"(?P<date>\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4})\s+"
+        r"(?P<time>\d{1,2}:\d{2}(?::\d{2})?)"
+    ),
+]
+
+
+def _parse_datetime(text: str) -> str | None:
+    """Return ISO-8601 slip datetime (YYYY-MM-DDTHH:MM[:SS]) or None.
+
+    Handles Thai Buddhist-era years (2560s → subtract 543) and 2-digit years
+    (interpret as 20xx). Time is optional; date-only slips return
+    YYYY-MM-DDT00:00.
+    """
+    for pattern in DATETIME_PATTERNS:
+        m = pattern.search(text)
+        if not m:
+            continue
+        raw_date = m.group("date")
+        raw_time = m.groupdict().get("time")
+        parts = re.split(r"[/\-.]", raw_date)
+        if len(parts) != 3:
+            continue
+        try:
+            d, mo, y = (int(parts[0]), int(parts[1]), int(parts[2]))
+        except ValueError:
+            continue
+        if y < 100:
+            y += 2000
+        elif y >= 2500:  # Thai Buddhist era
+            y -= 543
+        if not (1 <= d <= 31 and 1 <= mo <= 12 and 2000 <= y <= 2100):
+            continue
+        if raw_time:
+            tparts = raw_time.split(":")
+            hh, mm = int(tparts[0]), int(tparts[1])
+            ss = int(tparts[2]) if len(tparts) > 2 else 0
+            if not (0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60):
+                continue
+            return f"{y:04d}-{mo:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}"
+        return f"{y:04d}-{mo:02d}-{d:02d}T00:00:00"
+    return None
+
 
 @dataclass
 class OCRResult:
@@ -55,6 +108,7 @@ class OCRResult:
     receiver_name: str | None = None
     bank: str | None = None
     last4: str | None = None
+    slip_datetime: str | None = None  # ISO-8601, from the slip itself
     confidence: float = 0.0
     raw_text: str = ""
     source: str = "parser"
@@ -134,6 +188,7 @@ def parse_slip_text(text: str) -> OCRResult:
     bank = detect_bank(text)
     last4 = _parse_last4(text)
     name = _parse_name(text)
+    dt = _parse_datetime(text)
 
     score = 0.0
     if amount is not None:
@@ -150,6 +205,7 @@ def parse_slip_text(text: str) -> OCRResult:
         receiver_name=name,
         bank=bank,
         last4=last4,
+        slip_datetime=dt,
         confidence=round(score, 1),
         raw_text=text,
         source="parser",
@@ -170,7 +226,9 @@ async def vision_ocr(image_bytes: bytes, api_key: str | None = None) -> OCRResul
     prompt = (
         "Extract Thai bank transfer slip fields as JSON only with keys: "
         "amount_thb (number), receiver_name (string), bank (SCB|KBANK|BBL|KTB|BAY|TMB|GSB|BAAC), "
-        "last4 (4 digits), confidence (0-100). No prose."
+        "last4 (4 digits), slip_datetime (ISO-8601, e.g. 2026-08-04T14:32:00; null if illegible), "
+        "confidence (0-100). Convert Thai Buddhist years (25xx) to Gregorian (subtract 543). "
+        "No prose."
     )
     body = {
         "model": model,
@@ -210,6 +268,7 @@ async def vision_ocr(image_bytes: bytes, api_key: str | None = None) -> OCRResul
         receiver_name=data.get("receiver_name"),
         bank=data.get("bank"),
         last4=str(data.get("last4") or "")[-4:] or None,
+        slip_datetime=(data.get("slip_datetime") or None),
         confidence=float(data.get("confidence") or 92.0),
         raw_text=content,
         source="vision",
@@ -267,6 +326,7 @@ async def analyze_slip(
             receiver_name=result.receiver_name or fallback.receiver_name,
             bank=result.bank or fallback.bank,
             last4=result.last4 or fallback.last4,
+            slip_datetime=result.slip_datetime or fallback.slip_datetime,
             confidence=max(result.confidence, fallback.confidence),
             raw_text=result.raw_text or fallback.raw_text,
             source="vision+parser",
@@ -300,7 +360,15 @@ def parse_usdt_amount(text: str) -> float | None:
 
 
 def parse_edit_command(text: str) -> dict[str, Any]:
-    """Parse edit corrections: THB 500 | USDT 12.5 | BANK SCB 3376"""
+    """Parse edit corrections.
+
+    Long form:   ``THB 500`` | ``USDT 12.5`` | ``BANK SCB 3376``
+    Shorthand:   ``+500`` (THB) | ``-12.5U`` or ``12.5U`` (USDT) | mix them
+
+    The shorthand is what appears on the EDIT card mockup; long form stays
+    for anyone who prefers explicit labels. Both can be combined in one
+    reply — ``+500 -12.5U`` sets both fields in a single message.
+    """
     out: dict[str, Any] = {}
     upper = text.strip()
     m_thb = re.search(r"\bTHB\s*([0-9]+(?:\.[0-9]+)?)", upper, re.IGNORECASE)
@@ -317,4 +385,15 @@ def parse_edit_command(text: str) -> dict[str, Any]:
     if m_bank:
         out["bank"] = detect_bank(m_bank.group(1)) or m_bank.group(1).upper()
         out["last4"] = m_bank.group(2)
+    # Shorthand: -12.5U / 12.5U → USDT; +500 → THB. Match USDT first so that
+    # a number carrying the U suffix isn't grabbed by the THB rule.
+    if "usdt" not in out:
+        m_shu = re.search(r"[-+]?\s*([0-9]+(?:\.[0-9]+)?)\s*U\b", upper)
+        if m_shu:
+            out["usdt"] = float(m_shu.group(1))
+    if "thb" not in out:
+        # A sign-prefixed number that isn't the USDT one (no U suffix on it).
+        m_sht = re.search(r"(?<![.\d])\+\s*([0-9]+(?:\.[0-9]+)?)(?!\s*U\b)", upper)
+        if m_sht:
+            out["thb"] = float(m_sht.group(1))
     return out

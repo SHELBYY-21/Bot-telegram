@@ -216,28 +216,11 @@ class SupabaseLedger:
     # --- ledger ids ------------------------------------------------------
 
     def next_ledger_id(self) -> str:
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
-        prefix = f"LV-{today}-"
-        rows = self._request(
-            "GET",
-            "/transactions",
-            params={
-                "select": "ledger_ref",
-                "ledger_ref": f"like.{prefix}*",
-                "order": "ledger_ref.desc",
-                "limit": "1",
-            },
-        )
-        seq = 1
-        if rows and rows[0].get("ledger_ref"):
-            try:
-                seq = int(str(rows[0]["ledger_ref"]).rsplit("-", 1)[-1]) + 1
-            except ValueError:
-                seq = 1
-        return make_ledger_id(seq=seq)
+        """Random ``CE-YYYYMMDD-XXXX`` — see Ledger.next_ledger_id notes."""
+        return make_ledger_id()
 
     def _lookup_uuid(self, entry_id: str) -> str | None:
-        """Accept either ledger_ref (LV-…) or raw UUID."""
+        """Accept either ledger_ref (CE-… or legacy LV-…) or raw UUID."""
         if len(entry_id) == 36 and entry_id.count("-") == 4:
             return entry_id
         rows = self._request(
@@ -524,6 +507,154 @@ class SupabaseLedger:
             )
 
         return self._to_ui(rows[0]) if rows else self.get(entry_id)
+
+    # --- dashboard -------------------------------------------------------
+
+    def today_summary(self) -> dict:
+        start, end = _day_bounds_utc()
+        rows = self._request(
+            "GET",
+            "/transactions",
+            params={
+                "select": "status,thb_amount,usdt_amount,net_profit_thb,profit_percent,ocr_confidence",
+                "created_at": f"gte.{start}",
+                "and": f"(created_at.lt.{end})",
+            },
+        ) or []
+        counts = {
+            "tx_count": 0,
+            "cancelled": 0,
+            "pending": 0,
+            "settled": 0,
+            "thb": 0.0,
+            "usdt": 0.0,
+            "profit_thb": 0.0,
+            "ocr_accuracy": None,
+        }
+        conf_sum = 0.0
+        conf_n = 0
+        for row in rows:
+            status_db = row.get("status") or ""
+            if status_db == "cancelled":
+                counts["cancelled"] += 1
+                continue
+            counts["tx_count"] += 1
+            thb = float(row.get("thb_amount") or 0)
+            usdt = float(row.get("usdt_amount") or 0)
+            profit_thb = row.get("net_profit_thb")
+            if profit_thb is None:
+                # Fall back to percent-derived profit for rows written before
+                # net_profit_thb was populated.
+                pct = float(row.get("profit_percent") or 0)
+                profit_thb = round(thb * pct / 100.0, 2)
+            counts["thb"] += thb
+            counts["usdt"] += usdt
+            counts["profit_thb"] += float(profit_thb)
+            if status_db == "completed":
+                counts["settled"] += 1
+            else:
+                counts["pending"] += 1
+            if row.get("ocr_confidence") is not None:
+                conf_sum += float(row["ocr_confidence"])
+                conf_n += 1
+        counts["thb"] = round(counts["thb"], 2)
+        counts["usdt"] = round(counts["usdt"], 4)
+        counts["profit_thb"] = round(counts["profit_thb"], 2)
+        if conf_n:
+            counts["ocr_accuracy"] = round(conf_sum / conf_n, 2)
+        return counts
+
+    def today_by_staff(self) -> list[dict]:
+        """Per-admin totals for today.
+
+        The Supabase schema tracks the operator as ``admin_id``; there is no
+        Telegram-side ``staff_id`` field on transactions (see _to_ui — it's
+        always None), so we aggregate by admin_id and hydrate the display
+        name from /admins.
+        """
+        start, end = _day_bounds_utc()
+        rows = self._request(
+            "GET",
+            "/transactions",
+            params={
+                "select": "admin_id,thb_amount,usdt_amount,net_profit_thb,profit_percent,status",
+                "created_at": f"gte.{start}",
+                "and": f"(created_at.lt.{end},status.neq.cancelled)",
+            },
+        ) or []
+        agg: dict[str, dict] = {}
+        for row in rows:
+            admin_id = row.get("admin_id") or "—"
+            bucket = agg.setdefault(
+                admin_id,
+                {"admin_id": admin_id, "tx_count": 0, "thb": 0.0, "usdt": 0.0, "profit_thb": 0.0},
+            )
+            bucket["tx_count"] += 1
+            thb = float(row.get("thb_amount") or 0)
+            usdt = float(row.get("usdt_amount") or 0)
+            profit_thb = row.get("net_profit_thb")
+            if profit_thb is None:
+                pct = float(row.get("profit_percent") or 0)
+                profit_thb = round(thb * pct / 100.0, 2)
+            bucket["thb"] += thb
+            bucket["usdt"] += usdt
+            bucket["profit_thb"] += float(profit_thb)
+
+        # Hydrate names in a single query
+        ids = [a for a in agg if a and a != "—"]
+        names: dict[str, str] = {}
+        if ids:
+            admins = self._request(
+                "GET",
+                "/admins",
+                params={
+                    "select": "id,telegram_username,telegram_first_name",
+                    "id": f"in.({','.join(ids)})",
+                },
+            ) or []
+            for a in admins:
+                names[str(a["id"])] = (
+                    a.get("telegram_username")
+                    or a.get("telegram_first_name")
+                    or str(a["id"])[:8]
+                )
+
+        out = []
+        for admin_id, bucket in agg.items():
+            out.append(
+                {
+                    "staff_id": admin_id,
+                    "staff_name": names.get(str(admin_id), "—" if admin_id == "—" else str(admin_id)[:8]),
+                    "tx_count": bucket["tx_count"],
+                    "thb": round(bucket["thb"], 2),
+                    "usdt": round(bucket["usdt"], 4),
+                    "profit_thb": round(bucket["profit_thb"], 2),
+                }
+            )
+        out.sort(key=lambda b: b["tx_count"], reverse=True)
+        return out
+
+
+def _day_bounds_utc(now: datetime | None = None) -> tuple[str, str]:
+    """Same shape as ledger._day_bounds_utc — duplicated here to keep the
+    Supabase module self-contained (avoid a cross-module import of a private)."""
+    import os
+
+    tz_name = os.environ.get("TIMEZONE", "Asia/Bangkok")
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    now = now or datetime.now(tz)
+    local = now.astimezone(tz)
+    start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(timezone.utc).isoformat(),
+        end_local.astimezone(timezone.utc).isoformat(),
+    )
 
 
 def _num(value: Any) -> float | None:

@@ -11,6 +11,8 @@ Commands:
   /ledger [id]           — recent entries or one card
   /history [BANK last4]  — receiver dossier
   /status [id]           — active or specific ledger
+  /today                 — mini dashboard (counts, sums, profit, pending)
+  /staff                 — per-person totals for today
   /demo                  — offline fixture slip
   /delete <id>           — delete confirmation
 
@@ -43,8 +45,10 @@ from ce_vault.handlers import (
     cmd_ledger,
     cmd_rates,
     cmd_setrates,
+    cmd_staff,
     cmd_start,
     cmd_status,
+    cmd_today,
     on_callback,
     on_photo,
     on_text,
@@ -85,6 +89,8 @@ def build_app(settings: Settings | None = None, ledger_store=None) -> Applicatio
     application.add_handler(CommandHandler("rates", cmd_rates))
     application.add_handler(CommandHandler("setrates", cmd_setrates))
     application.add_handler(CommandHandler("balance", cmd_balance))
+    application.add_handler(CommandHandler("today", cmd_today))
+    application.add_handler(CommandHandler("staff", cmd_staff))
     application.add_handler(CommandHandler("ledger", cmd_ledger))
     application.add_handler(CommandHandler("history", cmd_history))
     application.add_handler(CommandHandler("status", cmd_status))

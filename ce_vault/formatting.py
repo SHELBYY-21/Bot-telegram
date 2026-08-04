@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 from typing import Any
+
+# Alphanumeric alphabet (no lowercase, no ambiguous 0/O/1/I) for ledger IDs.
+_ID_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
 
 def money(value: float | int | None, places: int = 2) -> str:
@@ -39,9 +43,22 @@ def mask_account(last4: str | None, bank: str | None = None) -> str:
     return f"{bank_part} ••••{digits}"
 
 
-def ledger_id(now: datetime | None = None, seq: int = 1) -> str:
+def ledger_id(now: datetime | None = None, seq: int | None = None) -> str:
+    """CE VAULT ledger reference: ``CE-YYYYMMDD-XXXX``.
+
+    The 4-char suffix is random alphanumeric (Crockford-style — no
+    ambiguous 0/O/1/I), not a sequence, so IDs can be generated without a
+    global counter or extra roundtrip. Collision odds within a day: 4-of-32
+    = 1 in 1,048,576.
+
+    ``seq`` is accepted for backwards compatibility with call sites that
+    still pass it; it is ignored in favor of the random suffix. The old
+    ``LV-…-NNNN`` format is still readable — this function only affects
+    newly-generated IDs.
+    """
     ts = now or datetime.now(timezone.utc)
-    return f"LV-{ts.strftime('%Y%m%d')}-{seq:04d}"
+    suffix = "".join(secrets.choice(_ID_ALPHABET) for _ in range(4))
+    return f"CE-{ts.strftime('%Y%m%d')}-{suffix}"
 
 
 def when(iso: str | None) -> str:
