@@ -1,9 +1,9 @@
-# fly.toml app configuration file generated for bot-telegram-srjmuw on 2026-08-04T08:00:03Z
+# fly.toml app configuration file generated for bot-telegram-imme8g on 2026-08-04T08:15:47Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'bot-telegram-srjmuw'
+app = 'bot-telegram-imme8g'
 primary_region = 'sin'
 
 [build]
