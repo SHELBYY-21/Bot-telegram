@@ -404,6 +404,20 @@ async def begin_from_ocr(
 
     store = _ledger(context)
     duplicate = store.find_by_slip_hash(digest)
+    # A duplicate slip is not something to record a second time — surface the
+    # previous ledger reference and stop. Design principle: one card, one
+    # decision; the decision here is "resubmit or contact Admin".
+    if duplicate:
+        await render(
+            update,
+            context,
+            cards.duplicate_slip_card(
+                previous_time=duplicate.get("created_at"),
+                previous_ledger_id=duplicate.get("id"),
+            ),
+        )
+        return
+
     repeat = store.is_repeat_receiver(result.bank, result.last4)
     repeat_count = 0
     hist = store.receiver_history(result.bank, result.last4)
@@ -457,6 +471,7 @@ async def begin_from_ocr(
             bank=result.bank,
             last4=result.last4,
             amount=result.amount_thb,
+            slip_datetime=result.slip_datetime,
             verified=bool(result.amount_thb and result.bank and result.last4 and not warn),
             warn=warn,
             duplicate=bool(duplicate),
@@ -647,6 +662,11 @@ async def _show_confirmation(
         if status == Status.WAITING_USDT.value
         else keyboards.confirm_keyboard(entry["id"])
     )
+    # Receiver dossier — shows "History: N Transactions" on the card
+    hist_count = None
+    hist = _ledger(context).receiver_history(entry.get("bank"), entry.get("last4"))
+    if hist and hist.get("tx_count"):
+        hist_count = int(hist["tx_count"])
     await render(
         update,
         context,
@@ -663,6 +683,7 @@ async def _show_confirmation(
             status=status
             if status != Status.RECEIVED.value
             else Status.OCR_VERIFIED.value,
+            history_count=hist_count,
         ),
         keyboard=keyboard,
     )
@@ -880,13 +901,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _sessions(context).update(
             update.effective_chat.id, active_ledger_id=None, mode="idle"
         )
+        thb_v = float(settled.get("thb") or 0)
+        usdt_v = float(settled.get("usdt") or 0)
+        buy_v = float(settled.get("buy_rate") or 0)
+        sell_v = float(settled.get("sell_rate") or 0)
+        profit_thb = round(usdt_v * (sell_v - buy_v), 2) if usdt_v and sell_v and buy_v else None
         await render(
             update,
             context,
             cards.success_card(
                 ledger_id=settled["id"],
                 profit_pct=settled.get("profit_pct"),
-                profit_thb=None,
+                profit_thb=profit_thb,
+                thb=thb_v or None,
+                usdt=usdt_v or None,
+                buy_rate=buy_v or None,
+                sell_rate=sell_v or None,
                 balance_usdt=bal,
             ),
             keyboard=keyboards.done_keyboard(),

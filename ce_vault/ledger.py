@@ -218,20 +218,14 @@ class Ledger:
     # --- ledger ids ------------------------------------------------------
 
     def next_ledger_id(self) -> str:
-        with self._db() as conn:
-            today = datetime.now(timezone.utc).strftime("%Y%m%d")
-            prefix = f"LV-{today}-"
-            row = conn.execute(
-                "SELECT id FROM ledger WHERE id LIKE ? ORDER BY id DESC LIMIT 1",
-                (prefix + "%",),
-            ).fetchone()
-            seq = 1
-            if row:
-                try:
-                    seq = int(str(row["id"]).rsplit("-", 1)[-1]) + 1
-                except ValueError:
-                    seq = 1
-            return make_ledger_id(seq=seq)
+        """Random ``CE-YYYYMMDD-XXXX`` — no counter, so no lookup.
+
+        Collision odds are ~1 in 1M per day; the ledger.id PRIMARY KEY
+        would surface a same-day dupe as an INTEGRITY error, at which
+        point the caller can retry. We don't loop here since the odds
+        make a re-roll on error strictly cheaper than a pre-check.
+        """
+        return make_ledger_id()
 
     # --- CRUD ------------------------------------------------------------
 
@@ -333,7 +327,7 @@ class Ledger:
         with self._db() as conn:
             rows = conn.execute(
                 """
-                SELECT status, thb, usdt, profit_pct
+                SELECT status, thb, usdt, profit_pct, ocr_confidence
                 FROM ledger
                 WHERE created_at >= ? AND created_at < ?
                 """,
@@ -347,7 +341,10 @@ class Ledger:
             "thb": 0.0,
             "usdt": 0.0,
             "profit_thb": 0.0,
+            "ocr_accuracy": None,  # average confidence across measured rows
         }
+        conf_sum = 0.0
+        conf_n = 0
         for row in rows:
             status = row["status"] or ""
             if status == Status.CANCELLED.value:
@@ -364,9 +361,14 @@ class Ledger:
                 counts["pending"] += 1
             profit_pct = float(row["profit_pct"] or 0)
             counts["profit_thb"] += round(thb * profit_pct / 100.0, 2)
+            if row["ocr_confidence"] is not None:
+                conf_sum += float(row["ocr_confidence"])
+                conf_n += 1
         counts["thb"] = round(counts["thb"], 2)
         counts["usdt"] = round(counts["usdt"], 4)
         counts["profit_thb"] = round(counts["profit_thb"], 2)
+        if conf_n:
+            counts["ocr_accuracy"] = round(conf_sum / conf_n, 2)
         return counts
 
     def today_by_staff(self) -> list[dict]:

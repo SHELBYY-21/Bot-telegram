@@ -360,7 +360,15 @@ def parse_usdt_amount(text: str) -> float | None:
 
 
 def parse_edit_command(text: str) -> dict[str, Any]:
-    """Parse edit corrections: THB 500 | USDT 12.5 | BANK SCB 3376"""
+    """Parse edit corrections.
+
+    Long form:   ``THB 500`` | ``USDT 12.5`` | ``BANK SCB 3376``
+    Shorthand:   ``+500`` (THB) | ``-12.5U`` or ``12.5U`` (USDT) | mix them
+
+    The shorthand is what appears on the EDIT card mockup; long form stays
+    for anyone who prefers explicit labels. Both can be combined in one
+    reply — ``+500 -12.5U`` sets both fields in a single message.
+    """
     out: dict[str, Any] = {}
     upper = text.strip()
     m_thb = re.search(r"\bTHB\s*([0-9]+(?:\.[0-9]+)?)", upper, re.IGNORECASE)
@@ -377,4 +385,15 @@ def parse_edit_command(text: str) -> dict[str, Any]:
     if m_bank:
         out["bank"] = detect_bank(m_bank.group(1)) or m_bank.group(1).upper()
         out["last4"] = m_bank.group(2)
+    # Shorthand: -12.5U / 12.5U → USDT; +500 → THB. Match USDT first so that
+    # a number carrying the U suffix isn't grabbed by the THB rule.
+    if "usdt" not in out:
+        m_shu = re.search(r"[-+]?\s*([0-9]+(?:\.[0-9]+)?)\s*U\b", upper)
+        if m_shu:
+            out["usdt"] = float(m_shu.group(1))
+    if "thb" not in out:
+        # A sign-prefixed number that isn't the USDT one (no U suffix on it).
+        m_sht = re.search(r"(?<![.\d])\+\s*([0-9]+(?:\.[0-9]+)?)(?!\s*U\b)", upper)
+        if m_sht:
+            out["thb"] = float(m_sht.group(1))
     return out

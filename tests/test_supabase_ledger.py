@@ -88,7 +88,7 @@ def test_create_entry_payload_and_ui_shape():
     assert captured["body"]["type"] == "THB_DEPOSIT"
     assert captured["body"]["status"] == "ocr_success"
     assert captured["body"]["receiver_bank"] == "SCB"
-    assert captured["body"]["ledger_ref"].startswith("LV-")
+    assert captured["body"]["ledger_ref"].startswith("CE-")
     assert entry["bank"] == "SCB"
     assert entry["status"] == Status.OCR_VERIFIED.value
     assert entry["thb"] == 500.0

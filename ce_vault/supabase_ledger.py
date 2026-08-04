@@ -216,28 +216,11 @@ class SupabaseLedger:
     # --- ledger ids ------------------------------------------------------
 
     def next_ledger_id(self) -> str:
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
-        prefix = f"LV-{today}-"
-        rows = self._request(
-            "GET",
-            "/transactions",
-            params={
-                "select": "ledger_ref",
-                "ledger_ref": f"like.{prefix}*",
-                "order": "ledger_ref.desc",
-                "limit": "1",
-            },
-        )
-        seq = 1
-        if rows and rows[0].get("ledger_ref"):
-            try:
-                seq = int(str(rows[0]["ledger_ref"]).rsplit("-", 1)[-1]) + 1
-            except ValueError:
-                seq = 1
-        return make_ledger_id(seq=seq)
+        """Random ``CE-YYYYMMDD-XXXX`` — see Ledger.next_ledger_id notes."""
+        return make_ledger_id()
 
     def _lookup_uuid(self, entry_id: str) -> str | None:
-        """Accept either ledger_ref (LV-…) or raw UUID."""
+        """Accept either ledger_ref (CE-… or legacy LV-…) or raw UUID."""
         if len(entry_id) == 36 and entry_id.count("-") == 4:
             return entry_id
         rows = self._request(
@@ -533,7 +516,7 @@ class SupabaseLedger:
             "GET",
             "/transactions",
             params={
-                "select": "status,thb_amount,usdt_amount,net_profit_thb,profit_percent",
+                "select": "status,thb_amount,usdt_amount,net_profit_thb,profit_percent,ocr_confidence",
                 "created_at": f"gte.{start}",
                 "and": f"(created_at.lt.{end})",
             },
@@ -546,7 +529,10 @@ class SupabaseLedger:
             "thb": 0.0,
             "usdt": 0.0,
             "profit_thb": 0.0,
+            "ocr_accuracy": None,
         }
+        conf_sum = 0.0
+        conf_n = 0
         for row in rows:
             status_db = row.get("status") or ""
             if status_db == "cancelled":
@@ -568,9 +554,14 @@ class SupabaseLedger:
                 counts["settled"] += 1
             else:
                 counts["pending"] += 1
+            if row.get("ocr_confidence") is not None:
+                conf_sum += float(row["ocr_confidence"])
+                conf_n += 1
         counts["thb"] = round(counts["thb"], 2)
         counts["usdt"] = round(counts["usdt"], 4)
         counts["profit_thb"] = round(counts["profit_thb"], 2)
+        if conf_n:
+            counts["ocr_accuracy"] = round(conf_sum / conf_n, 2)
         return counts
 
     def today_by_staff(self) -> list[dict]:

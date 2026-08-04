@@ -52,7 +52,71 @@ def value_row(lbl: str, val: str, *, monospace: bool = True) -> str:
 
 
 def divider() -> str:
-    return "────────────────────"
+    # 32 chars — matches the CE VAULT OS card width from the mockups.
+    return "────────────────────────────────"
+
+
+def boxed_title(title: str, subtitle: str | None = None) -> str:
+    """Rounded-corner box frame around a centered title.
+
+    Rendered as three lines, matching the mockup:
+        ╭──────────────────────────────╮
+                 <title>
+              <subtitle?>
+        ╰──────────────────────────────╯
+
+    Title is upper-cased (CE VAULT design language: headings = UPPERCASE).
+    Uses <pre> so Telegram keeps the exact spacing.
+    """
+    width = 30
+    top = "╭" + "─" * width + "╮"
+    bot = "╰" + "─" * width + "╯"
+    # Case is the author's call — mockups show both "CE VAULT" (upper) and
+    # "Confirm Transaction" (Title Case) in the box.
+    lines = [top, title.center(width)]
+    if subtitle:
+        lines.append(subtitle.center(width))
+    lines.append(bot)
+    return "<pre>" + esc("\n".join(lines)) + "</pre>"
+
+
+BADGE_MAP = {
+    "RECEIVED": "PROCESSING",
+    "OCR VERIFIED": "VERIFIED",
+    "WAITING USDT": "WAITING",
+    "SETTLED": "SETTLED",
+    "CANCELLED": "REVIEW",
+    "ERROR": "ERROR",
+    "EDITING": "REVIEW",
+}
+
+
+def status_badge(status: str, *, right: str | None = None) -> str:
+    """Single ● BADGE pill (design: one badge per card).
+
+    ``right`` puts an aligned right-hand value on the same line — used by the
+    OCR VERIFIED card which pairs the badge with the confidence number.
+    """
+    label_text = BADGE_MAP.get((status or "").upper().replace("_", " "), status.upper())
+    left = f"<b>● {esc(label_text)}</b>"
+    if right is None:
+        return left
+    return f"{left}{' ' * 4}{mono(right)}"
+
+
+def section(label_text: str, value: str, *, extra: str | None = None) -> str:
+    """CE VAULT section block — small UPPERCASE label, blank line, mono value.
+
+    ``extra`` renders on its own line beneath the primary value (e.g. the
+    receiver name below the "SCB ••••3376" line, or the time below the date).
+    """
+    # Case is the author's call: card 1 uses UPPERCASE (AMOUNT, RECEIVER,
+    # DATE, NEXT), other cards use Title Case (Buy Rate, First Seen). The
+    # mockups mix both, so we pass through and let the card decide.
+    lines = [label(label_text), "", mono(value)]
+    if extra:
+        lines.extend(["", esc(extra)])
+    return "\n".join(lines)
 
 
 def mask_account(last4: str | None) -> str:
